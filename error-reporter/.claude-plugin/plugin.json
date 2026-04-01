@@ -1,0 +1,5 @@
+{
+  "name": "error-reporter",
+  "version": "1.0.0",
+  "description": "Reads hook debug logs and creates GitHub issues when error thresholds are met"
+}
