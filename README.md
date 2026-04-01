@@ -7,6 +7,7 @@ Personal Claude Code plugin marketplace.
 | Plugin | Description |
 |--------|-------------|
 | [error-reporter](error-reporter/) | Hook debug log 분석 → GitHub Issue 자동 생성 |
+| [dashboard](dashboard/) | Claude Code hook event → Unix socket bridge for dashboard TUI |
 
 ## Installation
 
