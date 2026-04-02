@@ -1,0 +1,21 @@
+{
+  "name": "kb-cc-plugin",
+  "owner": {
+    "name": "LeeKangbok"
+  },
+  "metadata": {
+    "description": "Personal Claude Code plugin marketplace"
+  },
+  "plugins": [
+    {
+      "name": "error-reporter",
+      "source": "./error-reporter",
+      "description": "Reads hook debug logs and creates GitHub issues when fail events occur"
+    },
+    {
+      "name": "dashboard",
+      "source": "./dashboard",
+      "description": "Forwards all Claude Code hook events to a dashboard TUI via Unix socket"
+    }
+  ]
+}
