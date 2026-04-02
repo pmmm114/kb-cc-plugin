@@ -4,7 +4,9 @@
   "description": "Forwards all Claude Code hook events to a dashboard TUI via Unix socket",
   "userConfig": {
     "socket_path": {
+      "title": "Socket Path",
       "description": "Path to the Unix socket the TUI listens on (default: /tmp/claude-dashboard.sock)",
+      "type": "string",
       "sensitive": false
     }
   }
