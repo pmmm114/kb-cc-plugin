@@ -19,7 +19,6 @@ LOG_FILE="/tmp/claude-debug/$SESSION.jsonl"
 STATE_FILE="/tmp/claude-session/$SESSION.json"
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // ""')
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // ""')
-IS_SUBAGENT=$(echo "$INPUT" | jq -r '.is_subagent // false')
 
 # --- Pre-flight: check if debug log exists ---
 HAS_LOG=false
@@ -62,7 +61,7 @@ TRANSCRIPT_TAIL=""
   mkdir "/tmp/claude-report-${SESSION}.lock" 2>/dev/null || exit 0
   trap 'rmdir "/tmp/claude-report-${SESSION}.lock" 2>/dev/null' EXIT
 
-  TITLE="[harness-debug] $EVENT (${SESSION:0:8})"
+  TITLE="[harness-debug] $EVENT${AGENT_ID:+($AGENT_ID)} (${SESSION:0:8})"
 
   REPORT_BODY="## Raw State
 \`\`\`json

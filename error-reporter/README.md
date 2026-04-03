@@ -49,13 +49,13 @@ Layer 1의 로그를 읽고, fail 이벤트 감지 시 GitHub Issue를 생성합
 Title 형식:
 
 ```
-[harness-debug] EVENT (session_id_8)
+[harness-debug] EVENT(agent_id) (session_id_8)
 ```
 
 예시:
 
 ```
-[harness-debug] SubagentStop (a1b2c3d4)
+[harness-debug] SubagentStop(tdd-implementer) (a1b2c3d4)
 ```
 
 Issue body 구조 (raw data — 파싱/해석 없음):
