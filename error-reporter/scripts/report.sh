@@ -28,7 +28,9 @@ HAS_LOG=false
 # --- Threshold checks per event ---
 case "$EVENT" in
   StopFailure)
-    # Always report API errors — no threshold, proceeds even without log
+    # Filter transient errors — not harness bugs, just provider-side noise
+    SF_ERROR=$(echo "$INPUT" | jq -r '.error // ""')
+    case "$SF_ERROR" in rate_limit|server_error) exit 0 ;; esac
     ;;
   Stop)
     [ "$HAS_LOG" != true ] && exit 0
@@ -50,77 +52,37 @@ case "$EVENT" in
 esac
 
 # === Phase 1: Synchronous snapshot (fast, file reads only) ===
-STACK_RAW=$(cat "$LOG_FILE" 2>/dev/null)
 STATE_SNAPSHOT=$(cat "$STATE_FILE" 2>/dev/null || echo '{}')
-
-STATE_AGE="n/a"
-if [ -f "$STATE_FILE" ]; then
-  STATE_MTIME=$(stat -f%m "$STATE_FILE" 2>/dev/null)
-  [ -n "$STATE_MTIME" ] && STATE_AGE="$(( $(date +%s) - STATE_MTIME ))s"
-fi
-
-BLOCKING_HOOKS=""
-if [ "$HAS_LOG" = true ]; then
-  BLOCKING_HOOKS=$(jq -r 'select(.decision != "allow") | .hook' "$LOG_FILE" 2>/dev/null | sort -u | paste -sd ", " -)
-fi
-
+DEBUG_LOG_TAIL=$(tail -50 "$LOG_FILE" 2>/dev/null)
 TRANSCRIPT_TAIL=""
-if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-  TRANSCRIPT_TAIL=$(jq -r 'select(.role == "assistant") | .content' "$TRANSCRIPT" 2>/dev/null | tail -30)
-  [ -z "$TRANSCRIPT_TAIL" ] && TRANSCRIPT_TAIL=$(tail -20 "$TRANSCRIPT" 2>/dev/null)
-fi
-
-ERROR_INFO=""
-if [ "$EVENT" = "StopFailure" ]; then
-  ERROR_INFO=$(echo "$INPUT" | jq -r '"**Error**: " + (.error // "unknown") + " — " + (.error_details // "no details")' 2>/dev/null)
-fi
-
-PHASE=$(echo "$STATE_SNAPSHOT" | jq -r '.phase // "unknown"' 2>/dev/null)
-WF_ID=$(echo "$STATE_SNAPSHOT" | jq -r '.workflow_id // 0' 2>/dev/null)
+[ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] && TRANSCRIPT_TAIL=$(tail -20 "$TRANSCRIPT" 2>/dev/null)
 
 # === Phase 2: Fork to background — all network I/O happens here ===
 (
   mkdir "/tmp/claude-report-${SESSION}.lock" 2>/dev/null || exit 0
   trap 'rmdir "/tmp/claude-report-${SESSION}.lock" 2>/dev/null' EXIT
 
-  # Build error stack: filter to current workflow, most recent first
-  ERROR_STACK=$(echo "$STACK_RAW" \
-    | jq -r 'select(.decision != "allow") | "[" + .ts + "] " + .hook + "  " + .event + "  phase:" + .phase + "  " + .decision + ": " + (.reason // "")' 2>/dev/null \
-    | tail -50 \
-    | tac 2>/dev/null || tail -r 2>/dev/null)
+  TITLE="[harness-debug] $EVENT (${SESSION:0:8})"
 
-  # Full trace (including allows) for context
-  FULL_TRACE=$(echo "$STACK_RAW" \
-    | jq -r '"[" + .ts + "] " + .hook + "  " + .decision' 2>/dev/null \
-    | tail -50)
-
-  REPORT_BODY="## Harness Debug Report
-
-**Session**: \`$SESSION\` | **Trigger**: $EVENT | **Phase**: $PHASE | **Workflow**: #$WF_ID
-**Agent**: ${AGENT_ID:-(main)} | **Is Subagent**: $IS_SUBAGENT | **Time**: $(date -u +%Y-%m-%dT%H:%M:%SZ) | **State age**: $STATE_AGE
-
-${ERROR_INFO:+$ERROR_INFO
-
-}### Blocked Actions
-Most recent non-allow decisions — read bottom-up for causality chain.
-\`\`\`
-$ERROR_STACK
+  REPORT_BODY="## Raw State
+\`\`\`json
+${STATE_SNAPSHOT:-(unavailable)}
 \`\`\`
 
-### Config Context
-- **Blocking hooks**: ${BLOCKING_HOOKS:-(none)}
-
-### Full Trace (last 50 frames)
+## Debug Log (last 50)
 \`\`\`
-$FULL_TRACE
+${DEBUG_LOG_TAIL:-(unavailable)}
 \`\`\`
 
-### Surrounding Context
+## Transcript (last 20 lines)
 \`\`\`
 ${TRANSCRIPT_TAIL:-(unavailable)}
-\`\`\`"
+\`\`\`
 
-  TITLE="[harness-debug] $EVENT${AGENT_ID:+($AGENT_ID)} in phase:$PHASE (wf#$WF_ID)"
+## Hook Input
+\`\`\`json
+$INPUT
+\`\`\`"
 
   # Attempt GitHub issue creation
   if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
