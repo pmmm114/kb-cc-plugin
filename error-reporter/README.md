@@ -12,7 +12,7 @@ Hook debug log를 분석하여 fail 이벤트 발생 시 error stack을 GitHub I
 
 - **로그 위치**: `/tmp/claude-debug/<session_id>.jsonl`
 - **로그 포맷**: JSONL (한 줄 = 한 결정)
-- **필드**: `ts`, `event`, `hook`, `decision`, `reason`, `phase`, `wf_id`, `session`
+- **필드**: `ts`, `event`, `hook`, `decision`, `reason`, `phase`, `wf_id`, `session`, `agent_id`
 - **Decision 유형**: `allow`, `block`, `deny`, `guide`
 - **Ring buffer**: 1000줄 초과 시 500줄로 자동 트림
 - **정리**: SessionEnd 시 자동 삭제 (`state-recovery.sh`)
@@ -26,6 +26,7 @@ Hook debug log를 분석하여 fail 이벤트 발생 시 error stack을 GitHub I
 ### Layer 2: Error Reporter (this plugin)
 
 Layer 1의 로그를 읽고, fail 이벤트 감지 시 GitHub Issue를 생성합니다.
+**Raw Data Reporter** — state.json을 파싱하지 않고 원본 그대로 적재합니다. 해석은 이슈를 읽는 사람이 수행합니다.
 
 **실행 모델**: Synchronous snapshot → Background fork → Immediate exit 0
 
@@ -39,7 +40,7 @@ Layer 1의 로그를 읽고, fail 이벤트 감지 시 GitHub Issue를 생성합
 
 | Event | Threshold | 설명 |
 |-------|-----------|------|
-| `StopFailure` | 없음 (항상 리포트) | API 에러, rate limit 등 |
+| `StopFailure` | 없음 (항상 리포트) | API 에러. `rate_limit`, `server_error`는 transient로 필터링 (이슈 미생성) |
 | `Stop` | block/deny 1회 이상 | 세션 내 에러 패턴 감지 |
 | `SubagentStop` | block/deny 1회 이상 | 에이전트 실패 감지 (agent_id 스코프 필터링) |
 
@@ -48,22 +49,21 @@ Layer 1의 로그를 읽고, fail 이벤트 감지 시 GitHub Issue를 생성합
 Title 형식:
 
 ```
-[harness-debug] EVENT(agent_id) in phase:PHASE (wf#ID)
+[harness-debug] EVENT(agent_id) (session_id_8)
 ```
 
 예시:
 
 ```
-[harness-debug] SubagentStop(tdd-implementer) in phase:implementing (wf#3)
+[harness-debug] SubagentStop(tdd-implementer) (a1b2c3d4)
 ```
 
-Issue body 구조:
+Issue body 구조 (raw data — 파싱/해석 없음):
 
-- **Header**: Session, Trigger, Phase, Workflow, Agent, Is Subagent, Time, State age
-- **Blocked Actions**: allow 제외 전체 (block/deny/guide) 필터링, 최신 순 (causality chain), 최대 50개
-- **Config Context**: Blocking hooks 목록 (어떤 훅이 block/deny를 발생시켰는지)
-- **Full Trace**: 최근 50개 프레임 (allow 포함)
-- **Surrounding Context**: Transcript에서 assistant 역할 메시지 추출 (최대 30줄), 실패 시 tail -20 fallback
+- **Raw State**: `state.json` 원본 전체 (JSON)
+- **Debug Log (last 50)**: debug log 마지막 50줄
+- **Transcript (last 20 lines)**: transcript 마지막 20줄
+- **Hook Input**: hook event input JSON 원본
 
 ## Prerequisites
 
