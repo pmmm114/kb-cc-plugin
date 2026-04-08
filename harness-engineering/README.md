@@ -51,3 +51,7 @@ The `bin/` directory contains the benchmark infrastructure:
 | `bench.py` | Unified CLI (eval + workflow subcommands) |
 | `workflow_runner.py` | Multi-stage workflow eval runner |
 | `lib.py` | Shared utilities (grading, metrics, workspace management) |
+
+### Eval Definitions
+
+Place eval JSON files in `bin/evals/` and workflow eval JSON files in `bin/workflow-evals/`. These directories are empty by default — populate them with your project-specific eval definitions.
