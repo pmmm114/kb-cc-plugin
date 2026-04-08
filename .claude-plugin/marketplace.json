@@ -16,6 +16,11 @@
       "name": "dashboard",
       "source": "./dashboard",
       "description": "Forwards all Claude Code hook events to a dashboard TUI via Unix socket"
+    },
+    {
+      "name": "harness-engineering",
+      "source": "./harness-engineering",
+      "description": "Claude Code configuration management, benchmarking, and governance"
     }
   ]
 }
