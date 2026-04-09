@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/config-worktree-guard.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/config-worktree-guard.sh",
             "timeout": 5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/config-worktree-guard.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/config-worktree-guard.sh",
             "timeout": 5
           }
         ]
@@ -26,12 +26,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/config-guardian-worktree-guard.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/config-guardian-worktree-guard.sh",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/config-agent-dispatch-guard.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/config-agent-dispatch-guard.sh",
             "timeout": 5
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/subagent-validate-config.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/subagent-validate-config.sh",
             "timeout": 10
           }
         ]
@@ -53,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/subagent-validate-config.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/subagent-validate-config.sh",
             "timeout": 10
           }
         ]
@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/subagent-validate-config.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/subagent-validate-config.sh",
             "timeout": 10
           }
         ]
