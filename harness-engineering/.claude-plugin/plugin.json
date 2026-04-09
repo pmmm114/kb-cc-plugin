@@ -1,6 +1,0 @@
-{
-  "name": "harness-engineering",
-  "version": "1.0.0",
-  "description": "Claude Code configuration management, benchmarking, and governance",
-  "keywords": ["config", "benchmark", "eval", "harness"]
-}
