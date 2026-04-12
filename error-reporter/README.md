@@ -46,35 +46,60 @@ Layer 1의 로그를 읽고, fail 이벤트 감지 시 GitHub Issue를 생성합
 
 ## GitHub Issue Format
 
+[observation-log 택소노미](https://github.com/pmmm114/claude-harness-engineering/issues/37)를 따릅니다.
+
+**대상 레포**: `pmmm114/claude-harness-engineering`
+
 Title 형식:
 
 ```
-[harness-debug] EVENT(agent_id) (session_id_8)
+[incident] EVENT(agent_id) (session_id_8)
 ```
 
 예시:
 
 ```
-[harness-debug] SubagentStop(tdd-implementer) (a1b2c3d4)
+[incident] SubagentStop(tdd-implementer) (a1b2c3d4)
 ```
 
-Issue body 구조 (raw data — 파싱/해석 없음):
+### Labels
 
-- **Raw State**: `state.json` 원본 전체 (JSON)
-- **Debug Log (last 50)**: debug log 마지막 50줄
-- **Transcript (last 20 lines)**: transcript 마지막 20줄
-- **Hook Input**: hook event input JSON 원본
+| Label | 설명 |
+|-------|------|
+| `type:incident` | 자동 생성은 항상 incident |
+| `auto:hook-failure` | 자동 생성 구분용 |
+| `severity:<level>` | 심각도 자동 분류 (아래 참조) |
+| `domain:<area>` | hook/agent/infra 중 자동 추론 |
+| `agent:<name>` | 관련 에이전트 (있을 때만) |
+
+### Severity 자동 분류
+
+| Event | 조건 | Severity |
+|-------|------|----------|
+| `StopFailure` | timeout 에러 | `A3-resource` |
+| `StopFailure` | 그 외 | `A1-coordination` |
+| `Stop` | block/deny 감지 | `A2-guard-recovered` |
+| `SubagentStop` | block/deny 감지 | `A2-guard-recovered` |
+
+### Body 구조
+
+observation-log 템플릿 필드를 따르되, 자동/수동을 구분합니다:
+
+| 필드 | 자동 채움 | 수작업 |
+|------|-----------|--------|
+| Event, Agent, Session ID, Phase, Trigger Commit | ✓ | |
+| Severity, Reproducibility ("observed once") | ✓ | |
+| Evidence (debug log, transcript, state, hook input) | ✓ | |
+| Counterfactual | | ✓ (placeholder) |
+| Hypothesis | | ✓ (placeholder) |
 
 ## Prerequisites
 
 - `jq` 설치 (hook input JSON 파싱에 필수)
 - `gh` CLI 설치 및 인증 (`gh auth login`)
-- 현재 디렉토리가 GitHub 리포지토리
-- `harness-debug` 라벨이 리포지토리에 존재
+- `pmmm114/claude-harness-engineering` 레포에 쓰기 권한
 
-```bash
-gh label create harness-debug --description "Auto-generated harness debug reports" --color "d93f0b" --force
-```
+라벨은 존재하지 않으면 자동 생성됩니다.
 
 ## Enable / Disable
 
