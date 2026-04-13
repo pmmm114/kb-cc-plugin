@@ -55,7 +55,7 @@ body:
     attributes:
       label: Relevant logs / output
       description: "훅 디버그 로그, 스택 트레이스, 에러 메시지 등 (민감 정보는 제거)"
-      render: shell
+      render: text
 
   - type: input
     id: env
