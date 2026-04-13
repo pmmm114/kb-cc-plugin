@@ -1,0 +1,45 @@
+name: Feature request
+description: 플러그인에 대한 기능 추가/개선을 제안합니다
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: plugin
+    attributes:
+      label: Plugin
+      description: 제안 대상 플러그인을 선택하세요
+      options:
+        - dashboard
+        - error-reporter
+        - new plugin (marketplace 전체)
+        - other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: 어떤 상황에서 불편함을 느꼈나요? 해결하려는 문제는 무엇인가요?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: 원하는 동작/인터페이스를 구체적으로 적어주세요
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: 검토했지만 채택하지 않은 다른 방식이 있다면 적어주세요
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: 스크린샷, 관련 이슈/PR, 참고 링크 등

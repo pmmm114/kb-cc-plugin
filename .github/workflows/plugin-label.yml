@@ -1,0 +1,81 @@
+name: Plugin label from issue form
+
+# Applies a `plugin:<name>` label derived from the "Plugin" dropdown in
+# .github/ISSUE_TEMPLATE/bug_report.yml and feature_request.yml. Issue forms
+# render dropdown values as plain text under an H3 heading matching the field
+# label, so we parse the issue body directly — static `labels:` in the form
+# cannot interpolate form input.
+#
+# Docs:
+#   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#issues
+#   https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/rest/issues/labels
+#   https://github.com/actions/github-script
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: plugin-label-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  apply-plugin-label:
+    if: github.event.issue.pull_request == null
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const KNOWN_PLUGINS = new Set(['dashboard', 'error-reporter']);
+
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+
+            const match = body.match(
+              /^###\s+Plugin\s*\r?\n\s*\r?\n([\s\S]*?)(?=\r?\n###\s|\r?\n*$)/m
+            );
+            const raw = match ? match[1].trim() : '';
+            core.info(`Parsed Plugin selection: "${raw}"`);
+
+            if (!raw || raw === '_No response_') {
+              core.info('No selection; skipping.');
+              return;
+            }
+
+            const selection = raw.toLowerCase();
+            if (!KNOWN_PLUGINS.has(selection)) {
+              core.info(`"${raw}" is not a known plugin; skipping.`);
+              return;
+            }
+            const desired = `plugin:${selection}`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = issue.number;
+            const current = (issue.labels || []).map(
+              l => typeof l === 'string' ? l : l.name
+            );
+            const kept = current.filter(name => !name.startsWith('plugin:'));
+            const next = [...new Set([...kept, desired])];
+
+            const currentSet = new Set(current);
+            const nextSet = new Set(next);
+            const unchanged =
+              currentSet.size === nextSet.size &&
+              [...currentSet].every(l => nextSet.has(l));
+            if (unchanged) {
+              core.info(`Labels unchanged (${desired} already present).`);
+              return;
+            }
+
+            core.info(`Setting labels to: ${next.join(', ')}`);
+            await github.rest.issues.setLabels({
+              owner,
+              repo,
+              issue_number,
+              labels: next,
+            });
