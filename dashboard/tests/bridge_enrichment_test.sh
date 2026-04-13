@@ -45,7 +45,7 @@ get_output() {
 }
 
 reset_output() {
-  > "/tmp/bridge-test-output-$$"
+  : > "/tmp/bridge-test-output-$$"
 }
 
 assert_eq() {
@@ -250,7 +250,7 @@ echo "Test 7: Empty stack file -> passthrough"
 start_listener
 reset_output
 
-> "$STACK_FILE"
+: > "$STACK_FILE"
 
 TOOL_EVENT=$(jq -n \
   --arg event "PreToolUse" \

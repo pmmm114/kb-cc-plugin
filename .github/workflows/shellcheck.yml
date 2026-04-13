@@ -12,7 +12,7 @@ on:
 
 jobs:
   shellcheck:
-    name: ShellCheck (error-reporter)
+    name: ShellCheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,9 +20,7 @@ jobs:
         uses: ludeeus/action-shellcheck@master
         with:
           severity: warning
-          # Initial rollout scopes the gate to error-reporter only. dashboard
-          # has two pre-existing SC2188 warnings in its test scripts — folded
-          # into a follow-up PR. Expand `scandir` once those are resolved.
-          scandir: './error-reporter'
-          additional_files: |
-            error-reporter/scripts/report.sh
+          # Repo-wide scope. Initial rollout in PR #11 was scoped to
+          # error-reporter only because dashboard/tests/bridge_enrichment_test.sh
+          # had two pre-existing SC2188 warnings. Those are fixed in issue #13,
+          # so the gate now covers every *.sh in the repo.
