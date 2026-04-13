@@ -116,11 +116,34 @@ claude plugin disable ./plugins/local/error-reporter --scope local
 
 ## Fallback
 
-`gh` CLI가 없거나 인증 실패 시, 리포트를 로컬 파일로 저장합니다:
+`gh` CLI가 없거나, 인증 실패 시, **또는 `gh issue create` 호출이 런타임 실패한 경우**(쿼터, 네트워크 타임아웃, 라벨 검증 실패 등), 리포트 본문을 로컬 파일로 저장합니다:
 
 ```
-${CLAUDE_PLUGIN_DATA}/reports/<session_id>-<timestamp>.md
+${CLAUDE_PLUGIN_DATA}/reports/<session_id>-<epoch>-<pid>.md
 ```
+
+파일 권한은 `0600` (전사 본문에 세션 ID·state snapshot 등 민감 필드 포함).
+`<pid>` 접미사는 같은 세션·같은 epoch 초에 두 건의 실패가 겹쳐도 파일 충돌을 막기 위한 것입니다 (gh+로컬 재시도 경로).
+
+### 진단 로그: `error-reporter.log`
+
+`gh issue create` 의 성공/실패 여부를 단일 라인 key=value 포맷으로 추적합니다. "empty log == 리포터가 한 번도 실행되지 않음" 을 healthy 와 구분할 수 있도록 **성공 시에도 audit breadcrumb** 를 남깁니다.
+
+```
+${CLAUDE_PLUGIN_DATA}/logs/error-reporter.log
+```
+
+포맷:
+```
+[<epoch>] status=ok   event=<event> sid=<full-sid> phase=<phase> agent=<agent> domain=<domain> commit=<sha>
+[<epoch>] status=fail event=<event> sid=<full-sid> phase=<phase> agent=<agent> domain=<domain> commit=<sha> exit=<N> stderr=<quoted>
+```
+
+- Timestamp 는 epoch 초(`/tmp/claude-debug/*.jsonl` 과 correlation 용이)
+- Session ID 는 full 36-char (8-char truncation birthday collision 방지)
+- `stderr` 는 `tr '\n\r' '  '` 정규화 후 512 바이트 cap + `%q` 쉘 인용
+- Ring buffer: 1000 라인 초과 시 **첫 줄(first-occurrence 보존)** + 마지막 499 라인으로 트림
+- 파일 권한: `0600` (gh stderr 가 일부 failure mode 에서 auth token 단편을 echo 하는 경우 대비)
 
 ## File Structure
 
@@ -141,7 +164,7 @@ plugins/local/error-reporter/
 - 네트워크 I/O는 `& disown`으로 백그라운드 실행 — 훅 timeout 무관
 - 동기 구간은 파일 읽기만 (~1ms) — Claude Code 응답 지연 없음
 - Layer 1 로깅은 서브셸 + `>/dev/null 2>/dev/null || true` — stdout/stderr 오염 없음
-- **중복 방지**: 세션별 marker file (`/tmp/claude-report-{SESSION}.reported`)로 1회만 리포트, `mkdir` atomic lock으로 동시 fork 경합 방지
+- **중복 방지**: 세션별 marker file (`/tmp/claude-report-{SESSION}.reported`) 로 보통 세션당 1회만 리포트. 단 `gh` 와 로컬 폴백이 **모두** 실패한 경우 마커는 찍히지 않아 다음 이벤트에서 재시도 (세션 가시성 보장). `mkdir` atomic lock 으로 동시 fork 경합 방지, SIGKILL/OOM 으로 남은 5분 이상 경과 lock 은 재활용. `/tmp/claude-report-*` 아티팩트는 7일 TTL 로 opportunistic sweep.
 
 ## Plugin Self-Containment
 
