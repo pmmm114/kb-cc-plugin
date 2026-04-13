@@ -1,0 +1,28 @@
+name: shellcheck
+
+on:
+  push:
+    paths:
+      - '**/*.sh'
+      - '.github/workflows/shellcheck.yml'
+  pull_request:
+    paths:
+      - '**/*.sh'
+      - '.github/workflows/shellcheck.yml'
+
+jobs:
+  shellcheck:
+    name: ShellCheck (error-reporter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning
+          # Initial rollout scopes the gate to error-reporter only. dashboard
+          # has two pre-existing SC2188 warnings in its test scripts — folded
+          # into a follow-up PR. Expand `scandir` once those are resolved.
+          scandir: './error-reporter'
+          additional_files: |
+            error-reporter/scripts/report.sh
