@@ -84,9 +84,11 @@ Title 형식:
 | `auto:hook-failure` | 자동 생성 구분용 |
 | `severity:<level>` | 심각도 자동 분류 (아래 참조) |
 | `reporter:domain:<area>` | hook/agent/infra 중 자동 추론 (플러그인 namespace) |
-| `reporter:agent:<name>` | 관련 에이전트 (있을 때만, 플러그인 namespace) |
+| `reporter:agent:<name>` | `agent_id` 가 있는 경우 — 값은 Claude Code 가 `Agent(subagent_type=...)` 에 전달한 문자열 그대로 (하네스-코어/플러그인 공급 agent 모두) |
 
 > `reporter:` 접두사는 다른 자동화/사람이 소유한 `domain:*`/`agent:*` 라벨과의 충돌을 방지하기 위한 namespace 입니다 (E4 리뷰 피드백).
+>
+> `reporter:agent:<name>` 의 `<name>` 은 **하드코딩된 allowlist 없이** hook input 의 `agent_id` 필드를 그대로 반영합니다 (issue #15). 하네스-코어 agent (`planner`, `editor`, `guardian`) 는 물론, 다른 플러그인이 공급하는 sub-agent (예: skill-creator 의 `grader`/`comparator`/`analyzer`, code-simplifier 의 `code-simplifier`) 도 자동으로 per-agent 라벨을 받습니다. 하네스의 `subagent-validate.sh` 가 이미 `agent_id` 값을 게이트하므로 플러그인 수준의 중복 검증은 불필요하다는 설계 판단입니다.
 
 ### Severity 자동 분류
 

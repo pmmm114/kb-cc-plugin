@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  push:
+    paths:
+      - 'error-reporter/**'
+      - '.github/workflows/tests.yml'
+  pull_request:
+    paths:
+      - 'error-reporter/**'
+      - '.github/workflows/tests.yml'
+
+jobs:
+  error-reporter-smoke:
+    name: error-reporter end-to-end smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Run smoke test
+        run: bash error-reporter/tests/end_to_end_test.sh
