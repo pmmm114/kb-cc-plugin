@@ -92,6 +92,11 @@ HAS_LOG=false
 [ -f "$LOG_FILE" ] && HAS_LOG=true
 
 # --- Threshold checks per event ---
+# TRIGGER_HOOK: populated for Stop/SubagentStop from the last entry that
+# survived EXPECTED_DENY_FILTER — i.e. the actual hook that tripped the
+# incident threshold. Used by infer_domain(). Empty for StopFailure
+# (the event isn't a hook deny, it's an upstream API error).
+TRIGGER_HOOK=""
 case "$EVENT" in
   StopFailure)
     SF_ERROR=$(echo "$INPUT" | jq -r '.error // ""')
@@ -126,8 +131,10 @@ case "$EVENT" in
     '
     if [ "$EVENT" = "SubagentStop" ] && [ -n "$AGENT_ID" ]; then
       BLOCK_COUNT=$(jq -r --arg aid "$AGENT_ID" "$EXPECTED_DENY_FILTER | select(.agent_id == \$aid or .agent_id == null) | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
+      TRIGGER_HOOK=$(jq -r --arg aid "$AGENT_ID" "$EXPECTED_DENY_FILTER | select(.agent_id == \$aid or .agent_id == null) | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
     else
       BLOCK_COUNT=$(jq -r "$EXPECTED_DENY_FILTER | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
+      TRIGGER_HOOK=$(jq -r "$EXPECTED_DENY_FILTER | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
     fi
     [ "${BLOCK_COUNT:-0}" -lt 1 ] && exit 0
     ;;
@@ -160,39 +167,40 @@ case "$EVENT" in
     ;;
 esac
 
-# --- Domain inference from debug log hook names ---
-# Maps hook script names to their domain
+# --- Domain inference (issue #15 refactor) ---
+#
+# Classify the incident into a reporter:domain:* bucket. Two signals:
+#
+# 1. $AGENT_ID truthy → reporter:domain:agent. **No allowlist.** The harness
+#    already gates which agent_id values reach a SubagentStop event via
+#    subagent-validate.sh + settings.json hook matchers, so any value that
+#    gets here is by definition a real agent invocation. Plugin-provided
+#    agents (skill-creator's grader/comparator/analyzer, code-simplifier,
+#    etc.) are handled automatically — no per-plugin update needed. This
+#    replaces the earlier hardcoded `planner|tdd-implementer|config-*`
+#    allowlist that had drifted from the real roster. See issue #15 and the
+#    5-engineer review panel findings (Approach D).
+#
+# 2. $TRIGGER_HOOK = the single hook that tripped the threshold, extracted
+#    from EXPECTED_DENY_FILTER | tail -1 (set in the case arm above). This
+#    replaces the earlier "sort -u over all hooks + first match wins" logic,
+#    which was alphabetically arbitrary and often misclassified incidents.
 infer_domain() {
-  local hooks=""
-  if [ "$HAS_LOG" = true ]; then
-    hooks=$(jq -r '.hook // empty' "$LOG_FILE" 2>/dev/null | sort -u)
-  fi
-  # Also check agent_id for agent-domain mapping
-  case "$AGENT_ID" in
-    planner|tdd-implementer)       echo "reporter:domain:agent"; return ;;
-    config-planner|config-editor)  echo "reporter:domain:agent"; return ;;
-    config-guardian)               echo "reporter:domain:agent"; return ;;
+  [ -n "$AGENT_ID" ] && { echo "reporter:domain:agent"; return; }
+  case "$TRIGGER_HOOK" in
+    *config-worktree*|*config-agent*|*config-guardian*) echo "reporter:domain:hook"; return ;;
+    *pre-edit*|*verify-before*|*pr-template*|*pr-review*) echo "reporter:domain:hook"; return ;;
+    *delegation*|*subagent-validate*|*tdd-dispatch*) echo "reporter:domain:hook"; return ;;
+    *session-recovery*|*state-recovery*|*compact*|*preflight*) echo "reporter:domain:infra"; return ;;
   esac
-  # Map hook names to domains
-  for h in $hooks; do
-    case "$h" in
-      *config-worktree*|*config-agent*|*config-guardian*) echo "reporter:domain:hook"; return ;;
-      *pre-edit*|*verify-before*|*pr-template*|*pr-review*) echo "reporter:domain:hook"; return ;;
-      *delegation*|*subagent-validate*|*tdd-dispatch*) echo "reporter:domain:hook"; return ;;
-      *session-recovery*|*state-recovery*|*compact*|*preflight*) echo "reporter:domain:infra"; return ;;
-    esac
-  done
   echo "reporter:domain:hook"
 }
 DOMAIN=$(infer_domain)
 
-# --- Agent field ---
-AGENT_FIELD=""
-case "$AGENT_ID" in
-  planner|tdd-implementer|config-planner|config-editor|config-guardian)
-    AGENT_FIELD="$AGENT_ID"
-    ;;
-esac
+# --- Agent field (issue #15 refactor) ---
+# Trust $AGENT_ID verbatim — see infer_domain() comment. The existing
+# ${AGENT_FIELD:+...} guards in the subshell handle the empty case naturally.
+AGENT_FIELD="$AGENT_ID"
 
 # === Phase 2: Fork to background — all network I/O happens here ===
 (
