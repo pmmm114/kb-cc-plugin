@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "name": "claude-harness",
+  "debug_log_path": "/tmp/claude-debug/{session_id}.jsonl",
+  "state_file_path": "/tmp/claude-session/{session_id}.json",
+  "routine_deny_rules": [
+    {
+      "hook": "pre-edit-guard.sh",
+      "phases": [
+        "planning",
+        "reviewing",
+        "plan_review",
+        "config_planning",
+        "config_plan_review",
+        "config_editing"
+      ]
+    },
+    {
+      "hook": "agent-dispatch-guard.sh",
+      "phases": ["*"]
+    },
+    {
+      "hook": "pr-template-guard.sh",
+      "phases": ["*"]
+    },
+    {
+      "hook": "worktree-guard.sh",
+      "phases": ["idle", "config_*"]
+    },
+    {
+      "hook": "guardian-worktree-guard.sh",
+      "phases": ["*"]
+    }
+  ],
+  "domain_rules": [
+    {
+      "match": "*config-worktree*|*config-agent*|*config-guardian*",
+      "domain": "reporter:domain:hook"
+    },
+    {
+      "match": "*pre-edit*|*verify-before*|*pr-template*|*pr-review*",
+      "domain": "reporter:domain:hook"
+    },
+    {
+      "match": "*delegation*|*subagent-validate*|*tdd-dispatch*",
+      "domain": "reporter:domain:hook"
+    },
+    {
+      "match": "*session-recovery*|*state-recovery*|*compact*|*preflight*",
+      "domain": "reporter:domain:infra"
+    }
+  ],
+  "default_domain": "reporter:domain:hook",
+  "severity_rules": {
+    "StopFailure": {
+      "timeout": "A3-resource",
+      "default": "A1-coordination"
+    },
+    "Stop": "A2-guard-recovered",
+    "SubagentStop": "A2-guard-recovered"
+  }
+}

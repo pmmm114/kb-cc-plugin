@@ -1,0 +1,15 @@
+{"ts":"2026-04-16T00:00:01Z","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"plan-before-act","phase":"planning","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:02Z","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"plan-before-act","phase":"reviewing","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:03Z","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"plan-before-act","phase":"config_editing","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:04Z","event":"PreToolUse","hook":"agent-dispatch-guard.sh","decision":"deny","reason":"force /kb-harness","phase":"idle","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:05Z","event":"PreToolUse","hook":"pr-template-guard.sh","decision":"deny","reason":"use /pr","phase":"verifying","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:06Z","event":"PreToolUse","hook":"worktree-guard.sh","decision":"deny","reason":"config edit outside worktree","phase":"idle","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:07Z","event":"PreToolUse","hook":"worktree-guard.sh","decision":"deny","reason":"config edit outside worktree","phase":"config_planning","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:08Z","event":"PreToolUse","hook":"guardian-worktree-guard.sh","decision":"deny","reason":"guardian dispatch outside worktree","phase":"verifying","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:09Z","event":"PreToolUse","hook":"verify-before-done.sh","decision":"deny","reason":"missing test run","phase":"verifying","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:10Z","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"unexpected phase","phase":"executing","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:11Z","event":"PreToolUse","hook":"worktree-guard.sh","decision":"deny","reason":"unexpected phase","phase":"executing","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:12Z","event":"PreToolUse","hook":"some-third-party.sh","decision":"deny","reason":"unknown rule","phase":"verifying","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:13Z","event":"PreToolUse","hook":"verify-before-done.sh","decision":"block","reason":"blocked","phase":"verifying","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:14Z","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"allow","reason":"normal","phase":"executing","wf_id":"1","session":"baseline"}
+{"ts":"2026-04-16T00:00:15Z","event":"PreToolUse","hook":"worktree-guard.sh","decision":"deny","reason":"unexpected","phase":"reviewing","wf_id":"1","session":"baseline"}
