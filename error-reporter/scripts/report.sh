@@ -261,6 +261,9 @@ _preset_domain_lookup() {
     local pat dom
     pat=$(printf '%s' "$PRESET_DOMAIN_RULES_JSON" | jq -r --argjson i "$i" '.[$i].match')
     dom=$(printf '%s' "$PRESET_DOMAIN_RULES_JSON" | jq -r --argjson i "$i" '.[$i].domain')
+    # Unquoted $pat is intentional — preset supplies shell case-style globs
+    # (pipe-separated alternation). Quoting would force literal match.
+    # shellcheck disable=SC2254
     case "$h" in
       $pat) printf '%s\n' "$dom"; return ;;
     esac

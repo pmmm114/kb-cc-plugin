@@ -15,7 +15,6 @@ set +e
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPT="$REPO_ROOT/error-reporter/scripts/report.sh"
-PRESET="$REPO_ROOT/error-reporter/presets/claude-harness.json"
 
 PASS=0
 FAIL=0
@@ -74,7 +73,7 @@ fi
 PRESET_DENY_RULES_JSON='[{"hook":"c.sh","phases":["*"]}]'
 _build_deny_filter
 if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '($h == "c.sh")'; then
-  pass "case 2a: wildcard emits ($h == \"c.sh\")"
+  pass 'case 2a: wildcard emits ($h == "c.sh")'
 else
   fail "case 2a: wildcard emission incorrect"
 fi
@@ -105,6 +104,7 @@ fi
 hook='e".sh'
 phase=$'p$x`z\\n'
 # Build JSON safely via jq (avoid bash interpolation hazards)
+# shellcheck disable=SC2034  # consumed by sourced _build_deny_filter on next line
 PRESET_DENY_RULES_JSON=$(jq -nc --arg h "$hook" --arg p "$phase" '[{hook: $h, phases: [$p]}]')
 _build_deny_filter
 # Assertion 4: jq must compile the resulting filter without error
