@@ -1,14 +1,305 @@
 #!/bin/bash
 # error-reporter: Capture error stack and create structured GitHub issues.
 # Pattern: synchronous snapshot (file reads) → fork (network I/O) → immediate exit 0.
-# Output format follows the observation-log taxonomy (pmmm114/claude-harness-engineering#37).
+# Generic core with optional preset for log-producer-specific filtering.
 # This script NEVER blocks the Claude Code hook chain.
 #
 # Self-test mode: `bash report.sh --self-test` runs a dependency/reachability
 # probe with zero side effects — useful for on-call triage.
 set +e
 
-# --- Self-test: pure diagnostics, no side effects ---
+# === Pre-fork: globals + helpers (used by self-test and main path) ===
+
+# --- Path layout (E3 zero-migration: preserves L274/L303 semantics) ---
+ER_BASE="${CLAUDE_PLUGIN_DATA:-${HOME:-${TMPDIR:-/tmp}}/.claude/reports}"
+ERROR_LOG_DIR="$ER_BASE/logs"
+ERROR_LOG_FILE="$ERROR_LOG_DIR/error-reporter.log"
+ERROR_LOG_MAX=1000
+ERROR_LOG_KEEP=500
+REPORT_DIR="$ER_BASE/reports"
+MARKER_DIR="$ER_BASE/markers"
+LOCK_ROOT="$ER_BASE/locks"
+TS=$(date -u +%s)
+
+# --- Preset state globals ---
+PRESET_LOADED=false
+PRESET_NAME=""
+PRESET_DEBUG_LOG_PATH_TPL=""
+PRESET_STATE_FILE_PATH_TPL=""
+PRESET_DENY_RULES_JSON=""
+PRESET_DOMAIN_RULES_JSON=""
+PRESET_DEFAULT_DOMAIN=""
+PRESET_SEVERITY_RULES_JSON=""
+PRESET_DENY_FILTER_JQ=""
+REPORT_REPO=""
+
+# --- log_line: append + ring-buffer trim (callable pre-fork or in-fork) ---
+log_line() {
+  mkdir -p "$ERROR_LOG_DIR" 2>/dev/null || return
+  printf '%s\n' "$1" >> "$ERROR_LOG_FILE" 2>/dev/null || return
+  chmod 600 "$ERROR_LOG_FILE" 2>/dev/null || true
+  local n
+  # BSD wc (macOS) prints leading whitespace — tr -d ' ' is load-bearing.
+  n=$(wc -l < "$ERROR_LOG_FILE" 2>/dev/null | tr -d ' ')
+  if [ "${n:-0}" -gt "$ERROR_LOG_MAX" ]; then
+    { head -1 "$ERROR_LOG_FILE"; tail -$((ERROR_LOG_KEEP - 1)) "$ERROR_LOG_FILE"; } \
+      > "${ERROR_LOG_FILE}.$$.tmp" 2>/dev/null \
+      && mv "${ERROR_LOG_FILE}.$$.tmp" "$ERROR_LOG_FILE" 2>/dev/null
+  fi
+}
+
+# --- _resolve_preset_name: env > config.json > empty ---
+_resolve_preset_name() {
+  if [ -n "${ERROR_REPORTER_PRESET:-}" ]; then
+    printf '%s' "$ERROR_REPORTER_PRESET"
+    return
+  fi
+  local cfg="$ER_BASE/error-reporter/config.json"
+  if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1; then
+    local from_cfg
+    from_cfg=$(jq -r '.preset // empty' "$cfg" 2>/dev/null)
+    [ -n "$from_cfg" ] && { printf '%s' "$from_cfg"; return; }
+  fi
+}
+
+# --- _resolve_repo: env > config.json > empty ---
+_resolve_repo() {
+  if [ -n "${ERROR_REPORTER_REPO:-}" ]; then
+    REPORT_REPO="$ERROR_REPORTER_REPO"
+    return
+  fi
+  local cfg="$ER_BASE/error-reporter/config.json"
+  if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1; then
+    local from_cfg
+    from_cfg=$(jq -r '.repo // empty' "$cfg" 2>/dev/null)
+    [ -n "$from_cfg" ] && { REPORT_REPO="$from_cfg"; return; }
+  fi
+  REPORT_REPO=""
+}
+
+# --- _build_deny_filter: produces $PRESET_DENY_FILTER_JQ from PRESET_DENY_RULES_JSON ---
+# Spec:
+#   - phases: []     → skip the rule entirely (no clause emitted)
+#   - phases: ["*"]  → ($h == "<HOOK>") only, no phase constraint
+#   - phases mix     → (($h == "<HOOK>") and ($p == "x" or ($p | startswith("y_"))))
+#   - hooks/phases passed through `jq -Rs .` for safe JSON quoting
+#   - 3-layer parens mandatory; rules joined with top-level OR
+#   - outer select(.decision == "block" or .decision == "deny") prelude preserved
+#   - F4: do NOT dedupe rules (one OR clause per input entry, in order)
+_build_deny_filter() {
+  local rules="$PRESET_DENY_RULES_JSON"
+  [ -z "$rules" ] && rules='[]'
+  local count
+  count=$(printf '%s' "$rules" | jq 'length' 2>/dev/null)
+  count=${count:-0}
+
+  if [ "$count" -eq 0 ]; then
+    PRESET_DENY_FILTER_JQ='select(.decision == "block" or .decision == "deny")'
+    return
+  fi
+
+  local parts=""
+  local i=0
+  while [ "$i" -lt "$count" ]; do
+    local hook phases_json plen
+    hook=$(printf '%s' "$rules" | jq -r --argjson i "$i" '.[$i].hook')
+    phases_json=$(printf '%s' "$rules" | jq -c --argjson i "$i" '.[$i].phases // ["*"]')
+    plen=$(printf '%s' "$phases_json" | jq 'length')
+
+    [ "$plen" -eq 0 ] && { i=$((i + 1)); continue; }
+
+    local hook_lit
+    hook_lit=$(printf '%s' "$hook" | jq -Rs .)
+
+    local has_star=false
+    local phase_disjunction=""
+    local j=0
+    while [ "$j" -lt "$plen" ]; do
+      local p
+      p=$(printf '%s' "$phases_json" | jq -r --argjson j "$j" '.[$j]')
+      case "$p" in
+        "*")
+          has_star=true
+          break
+          ;;
+        *_\*)
+          local pfx="${p%\*}"
+          local pfx_lit
+          pfx_lit=$(printf '%s' "$pfx" | jq -Rs .)
+          if [ -z "$phase_disjunction" ]; then
+            phase_disjunction="(\$p | startswith($pfx_lit))"
+          else
+            phase_disjunction="$phase_disjunction or (\$p | startswith($pfx_lit))"
+          fi
+          ;;
+        *)
+          local p_lit
+          p_lit=$(printf '%s' "$p" | jq -Rs .)
+          if [ -z "$phase_disjunction" ]; then
+            phase_disjunction="\$p == $p_lit"
+          else
+            phase_disjunction="$phase_disjunction or \$p == $p_lit"
+          fi
+          ;;
+      esac
+      j=$((j + 1))
+    done
+
+    local rule_clause
+    if [ "$has_star" = true ]; then
+      rule_clause="(\$h == $hook_lit)"
+    else
+      rule_clause="((\$h == $hook_lit) and ($phase_disjunction))"
+    fi
+
+    if [ -z "$parts" ]; then
+      parts="$rule_clause"
+    else
+      parts="$parts or $rule_clause"
+    fi
+
+    i=$((i + 1))
+  done
+
+  PRESET_DENY_FILTER_JQ="
+    select(.decision == \"block\" or .decision == \"deny\")
+    | select(
+        ( (.hook // \"\") as \$h | (.phase // \"\") as \$p | ( $parts ) ) | not
+      )
+  "
+}
+
+# --- _load_preset <name>: reads preset, validates, populates PRESET_* globals ---
+# F5: resets all PRESET_* globals at entry (safe re-call)
+# D10: validates {session_id} placeholder presence
+# Fail-closed: log breadcrumb + return (never abort the hook chain)
+_load_preset() {
+  local name="$1"
+
+  # F5 reset
+  PRESET_LOADED=false
+  PRESET_NAME=""
+  PRESET_DEBUG_LOG_PATH_TPL=""
+  PRESET_STATE_FILE_PATH_TPL=""
+  PRESET_DENY_RULES_JSON=""
+  PRESET_DOMAIN_RULES_JSON=""
+  PRESET_DEFAULT_DOMAIN=""
+  PRESET_SEVERITY_RULES_JSON=""
+  PRESET_DENY_FILTER_JQ=""
+
+  [ -z "$name" ] && return
+  command -v jq >/dev/null 2>&1 || return
+
+  if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+    log_line "[$TS] status=preset_bad_schema preset=$name reason=CLAUDE_PLUGIN_ROOT_unset"
+    return
+  fi
+
+  local file="$CLAUDE_PLUGIN_ROOT/presets/${name}.json"
+  if [ ! -f "$file" ]; then
+    log_line "[$TS] status=preset_bad_schema preset=$name reason=file_not_found path=$file"
+    return
+  fi
+
+  local v
+  v=$(jq -r '.schema_version // empty' "$file" 2>/dev/null)
+  if [ "$v" != "1" ]; then
+    log_line "[$TS] status=preset_bad_schema preset=$name reason=unsupported_schema_version got=${v:-none}"
+    return
+  fi
+
+  local debug_tpl state_tpl
+  debug_tpl=$(jq -er '.debug_log_path' "$file" 2>/dev/null)
+  if [ -z "$debug_tpl" ]; then
+    log_line "[$TS] status=preset_bad_schema preset=$name reason=missing_field field=debug_log_path"
+    return
+  fi
+  state_tpl=$(jq -er '.state_file_path' "$file" 2>/dev/null)
+  if [ -z "$state_tpl" ]; then
+    log_line "[$TS] status=preset_bad_schema preset=$name reason=missing_field field=state_file_path"
+    return
+  fi
+
+  case "$debug_tpl" in
+    *'{session_id}'*) ;;
+    *)
+      log_line "[$TS] status=preset_bad_schema preset=$name reason=missing_placeholder field=debug_log_path"
+      return
+      ;;
+  esac
+  case "$state_tpl" in
+    *'{session_id}'*) ;;
+    *)
+      log_line "[$TS] status=preset_bad_schema preset=$name reason=missing_placeholder field=state_file_path"
+      return
+      ;;
+  esac
+
+  PRESET_DEBUG_LOG_PATH_TPL="$debug_tpl"
+  PRESET_STATE_FILE_PATH_TPL="$state_tpl"
+  PRESET_DENY_RULES_JSON=$(jq -c '.routine_deny_rules // []' "$file" 2>/dev/null)
+  PRESET_DOMAIN_RULES_JSON=$(jq -c '.domain_rules // []' "$file" 2>/dev/null)
+  PRESET_DEFAULT_DOMAIN=$(jq -r '.default_domain // "reporter:domain:hook"' "$file" 2>/dev/null)
+  PRESET_SEVERITY_RULES_JSON=$(jq -c '.severity_rules // {}' "$file" 2>/dev/null)
+  PRESET_NAME="$name"
+  PRESET_LOADED=true
+
+  _build_deny_filter
+}
+
+# --- _preset_domain_lookup <hook>: matches hook against domain_rules ---
+_preset_domain_lookup() {
+  local h="$1"
+  if [ -z "$h" ] || [ -z "$PRESET_DOMAIN_RULES_JSON" ]; then
+    printf '%s\n' "${PRESET_DEFAULT_DOMAIN:-reporter:domain:hook}"
+    return
+  fi
+  local count i
+  count=$(printf '%s' "$PRESET_DOMAIN_RULES_JSON" | jq 'length')
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    local pat dom
+    pat=$(printf '%s' "$PRESET_DOMAIN_RULES_JSON" | jq -r --argjson i "$i" '.[$i].match')
+    dom=$(printf '%s' "$PRESET_DOMAIN_RULES_JSON" | jq -r --argjson i "$i" '.[$i].domain')
+    # Unquoted $pat is intentional — preset supplies shell case-style globs
+    # (pipe-separated alternation). Quoting would force literal match.
+    # shellcheck disable=SC2254
+    case "$h" in
+      $pat) printf '%s\n' "$dom"; return ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s\n' "${PRESET_DEFAULT_DOMAIN:-reporter:domain:hook}"
+}
+
+# --- _resolve_severity <event> <sf_error>: preset-driven, "unknown" if no preset ---
+_resolve_severity() {
+  local event="$1"
+  local sf_error="$2"
+  if [ "$PRESET_LOADED" != true ] || [ -z "$PRESET_SEVERITY_RULES_JSON" ]; then
+    printf '%s\n' "unknown"
+    return
+  fi
+  local rule_type
+  rule_type=$(printf '%s' "$PRESET_SEVERITY_RULES_JSON" | jq -r --arg e "$event" '.[$e] | type')
+  case "$rule_type" in
+    object)
+      if printf '%s' "$sf_error" | grep -iq timeout; then
+        printf '%s' "$PRESET_SEVERITY_RULES_JSON" | jq -r --arg e "$event" '.[$e].timeout // "unknown"'
+      else
+        printf '%s' "$PRESET_SEVERITY_RULES_JSON" | jq -r --arg e "$event" '.[$e].default // "unknown"'
+      fi
+      ;;
+    string)
+      printf '%s' "$PRESET_SEVERITY_RULES_JSON" | jq -r --arg e "$event" '.[$e]'
+      ;;
+    *)
+      printf '%s\n' "unknown"
+      ;;
+  esac
+}
+
+# === Self-test mode: pure diagnostics, no side effects ===
 if [ "${1:-}" = "--self-test" ]; then
   printf 'error-reporter self-test\n========================\n\n'
   printf 'dependencies:\n'
@@ -27,50 +318,83 @@ if [ "${1:-}" = "--self-test" ]; then
   else
     printf '  [WARN] gh auth: not authenticated — fallback-only mode\n'
   fi
-  _SELF_TEST_REPO="pmmm114/claude-harness-engineering"
-  if command -v gh >/dev/null 2>&1 && gh repo view "$_SELF_TEST_REPO" >/dev/null 2>&1; then
-    printf '  [ok]   target repo reachable: %s\n' "$_SELF_TEST_REPO"
+
+  # R2 fix: soft-degradation when CLAUDE_PLUGIN_ROOT is unset
+  if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+    printf '  [WARN] preset: cannot check (CLAUDE_PLUGIN_ROOT unset)\n'
   else
-    printf '  [WARN] target repo unreachable: %s\n' "$_SELF_TEST_REPO"
+    _resolved_preset=$(_resolve_preset_name)
+    if [ -n "$_resolved_preset" ]; then
+      _load_preset "$_resolved_preset"
+      if [ "$PRESET_LOADED" = true ]; then
+        printf '  [ok]   preset: %s (loaded)\n' "$PRESET_NAME"
+      else
+        printf '  [FAIL] preset: %s (bad_schema)\n' "$_resolved_preset"
+      fi
+    else
+      printf '  [ok]   preset: none (generic mode)\n'
+    fi
   fi
-  _SELF_TEST_DATA="${CLAUDE_PLUGIN_DATA:-$HOME/.claude/reports}"
+
+  _resolve_repo
+  if [ -z "$REPORT_REPO" ]; then
+    printf '  [WARN] target repo: not configured (gh-skip mode)\n'
+  elif command -v gh >/dev/null 2>&1 && gh repo view "$REPORT_REPO" >/dev/null 2>&1; then
+    printf '  [ok]   target repo reachable: %s\n' "$REPORT_REPO"
+  else
+    printf '  [WARN] target repo unreachable: %s\n' "$REPORT_REPO"
+  fi
+
   printf '\ndata dir:\n'
-  if [ -d "$_SELF_TEST_DATA" ] && [ -w "$_SELF_TEST_DATA" ]; then
-    printf '  [ok]   %s (writable)\n' "$_SELF_TEST_DATA"
-  elif [ -d "$_SELF_TEST_DATA" ]; then
-    printf '  [FAIL] %s (exists but not writable)\n' "$_SELF_TEST_DATA"
+  if [ -d "$ER_BASE" ] && [ -w "$ER_BASE" ]; then
+    printf '  [ok]   %s (writable)\n' "$ER_BASE"
+  elif [ -d "$ER_BASE" ]; then
+    printf '  [FAIL] %s (exists but not writable)\n' "$ER_BASE"
   else
-    printf '  [warn] %s (will be created on first write)\n' "$_SELF_TEST_DATA"
+    printf '  [warn] %s (will be created on first write)\n' "$ER_BASE"
   fi
-  _SELF_TEST_LOG="$_SELF_TEST_DATA/logs/error-reporter.log"
-  _SELF_TEST_REPORTS="$_SELF_TEST_DATA/reports"
+
   printf '\nrecent activity:\n'
-  if [ -f "$_SELF_TEST_LOG" ]; then
-    _SELF_TEST_LINES=$(wc -l < "$_SELF_TEST_LOG" 2>/dev/null | tr -d ' ')
+  if [ -f "$ERROR_LOG_FILE" ]; then
+    _SELF_TEST_LINES=$(wc -l < "$ERROR_LOG_FILE" 2>/dev/null | tr -d ' ')
     printf '  error-reporter.log: %s lines\n' "${_SELF_TEST_LINES:-0}"
     printf '  last 5 entries:\n'
-    tail -5 "$_SELF_TEST_LOG" 2>/dev/null | sed 's/^/    /' || true
+    tail -5 "$ERROR_LOG_FILE" 2>/dev/null | sed 's/^/    /' || true
     printf '\n'
-    _SELF_TEST_FAILS=$(grep -c 'status=fail' "$_SELF_TEST_LOG" 2>/dev/null || echo 0)
-    _SELF_TEST_OKS=$(grep -c 'status=ok' "$_SELF_TEST_LOG" 2>/dev/null || echo 0)
-    printf '  status tally: ok=%s fail=%s\n' "${_SELF_TEST_OKS:-0}" "${_SELF_TEST_FAILS:-0}"
+    _SELF_TEST_OKS=$(grep -Ec 'status=ok' "$ERROR_LOG_FILE" 2>/dev/null || echo 0)
+    _SELF_TEST_FAILS=$(grep -Ec 'status=fail' "$ERROR_LOG_FILE" 2>/dev/null || echo 0)
+    _SELF_TEST_SKIPS=$(grep -Ec 'status=skip' "$ERROR_LOG_FILE" 2>/dev/null || echo 0)
+    _SELF_TEST_NOTICES=$(grep -Ec 'status=opt_in_notice' "$ERROR_LOG_FILE" 2>/dev/null || echo 0)
+    _SELF_TEST_PRESET_ERRS=$(grep -c 'status=preset_bad_schema' "$ERROR_LOG_FILE" 2>/dev/null || echo 0)
+    printf '  status tally: ok=%s fail=%s skip=%s notice=%s\n' \
+      "${_SELF_TEST_OKS:-0}" "${_SELF_TEST_FAILS:-0}" "${_SELF_TEST_SKIPS:-0}" "${_SELF_TEST_NOTICES:-0}"
+    printf '  preset errors: %s\n' "${_SELF_TEST_PRESET_ERRS:-0}"
   else
-    printf '  error-reporter.log: missing (%s)\n' "$_SELF_TEST_LOG"
+    printf '  error-reporter.log: missing (%s)\n' "$ERROR_LOG_FILE"
     printf '  note: empty log means the reporter has never run — not "healthy"\n'
   fi
-  if [ -d "$_SELF_TEST_REPORTS" ]; then
-    _SELF_TEST_REPORT_COUNT=$(find "$_SELF_TEST_REPORTS" -maxdepth 1 -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
-    printf '  fallback .md reports: %s in %s\n' "${_SELF_TEST_REPORT_COUNT:-0}" "$_SELF_TEST_REPORTS"
+  if [ -d "$REPORT_DIR" ]; then
+    _SELF_TEST_REPORT_COUNT=$(find "$REPORT_DIR" -maxdepth 1 -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+    printf '  fallback .md reports: %s in %s\n' "${_SELF_TEST_REPORT_COUNT:-0}" "$REPORT_DIR"
   else
     printf '  fallback .md reports: dir absent\n'
   fi
-  _SELF_TEST_MARKERS=$(find /tmp -maxdepth 1 -name 'claude-report-*.reported' -type f 2>/dev/null | wc -l | tr -d ' ')
-  _SELF_TEST_LOCKS=$(find /tmp -maxdepth 1 -name 'claude-report-*.lock' -type d 2>/dev/null | wc -l | tr -d ' ')
-  printf '  /tmp markers: %s reported, %s lockdirs\n' "${_SELF_TEST_MARKERS:-0}" "${_SELF_TEST_LOCKS:-0}"
+  if [ -d "$MARKER_DIR" ]; then
+    _SELF_TEST_MARKERS=$(find "$MARKER_DIR" -maxdepth 1 -name '*.reported' -type f 2>/dev/null | wc -l | tr -d ' ')
+  else
+    _SELF_TEST_MARKERS=0
+  fi
+  if [ -d "$LOCK_ROOT" ]; then
+    _SELF_TEST_LOCKS=$(find "$LOCK_ROOT" -maxdepth 1 -name '*.lock' -type d 2>/dev/null | wc -l | tr -d ' ')
+  else
+    _SELF_TEST_LOCKS=0
+  fi
+  printf '  markers: %s reported, %s lockdirs\n' "${_SELF_TEST_MARKERS:-0}" "${_SELF_TEST_LOCKS:-0}"
   printf '\n(no side effects: no issues created, no files written)\n'
   exit 0
 fi
 
+# === Main path: hook event processing ===
 command -v jq >/dev/null 2>&1 || { echo "error-reporter: jq not found" >&2; exit 0; }
 
 INPUT=$(cat)
@@ -79,62 +403,73 @@ SESSION=$(echo "$INPUT" | jq -r '.session_id // ""')
 
 [ -z "$SESSION" ] && exit 0
 
-MARKER="/tmp/claude-report-${SESSION}.reported"
+# F1: pre-fork mkdir is fine here (self-test already exited above)
+mkdir -p "$ERROR_LOG_DIR" "$MARKER_DIR" "$LOCK_ROOT" "$REPORT_DIR" 2>/dev/null || true
+
+MARKER="$MARKER_DIR/${SESSION}.reported"
 [ -f "$MARKER" ] && exit 0
 
-LOG_FILE="/tmp/claude-debug/$SESSION.jsonl"
-STATE_FILE="/tmp/claude-session/$SESSION.json"
+# Resolve preset + repo before any path-dependent logic
+PRESET_REQUEST=$(_resolve_preset_name)
+if [ -n "$PRESET_REQUEST" ]; then
+  _load_preset "$PRESET_REQUEST"
+fi
+_resolve_repo
+
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // ""')
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // ""')
 
-# --- Pre-flight: check if debug log exists ---
-HAS_LOG=false
-[ -f "$LOG_FILE" ] && HAS_LOG=true
-
 # --- Threshold checks per event ---
-# TRIGGER_HOOK: populated for Stop/SubagentStop from the last entry that
-# survived EXPECTED_DENY_FILTER — i.e. the actual hook that tripped the
-# incident threshold. Used by infer_domain(). Empty for StopFailure
-# (the event isn't a hook deny, it's an upstream API error).
 TRIGGER_HOOK=""
+LOG_FILE=""
+STATE_FILE=""
+SF_ERROR=""
+
 case "$EVENT" in
   StopFailure)
     SF_ERROR=$(echo "$INPUT" | jq -r '.error // ""')
     case "$SF_ERROR" in rate_limit|server_error) exit 0 ;; esac
     ;;
   Stop|SubagentStop)
-    [ "$HAS_LOG" != true ] && exit 0
-    # Exclude known-routine guard denies that fire as designed:
-    #   - pre-edit-guard during planning/reviewing/plan_review (plan-before-act is working)
-    #   - agent-dispatch-guard when routing user to /kb-harness entry (expected)
-    #   - pr-template-guard when routing direct gh pr create to /pr skill (expected)
-    #   - worktree-guard during config_* phases (first-edit redirect is expected)
-    #   - guardian-worktree-guard (always a routing guard)
-    # These are NOT hook failures; they are the harness guiding the user correctly.
-    # Without this filter, every session that used /kb-harness or plan-before-act
-    # would false-positive as an "incident" on the target repo (E4-F2 finding).
-    EXPECTED_DENY_FILTER='
-      select(.decision == "block" or .decision == "deny")
-      | select(
-          (
-            (.hook // "") as $h |
-            (.phase // "") as $p |
-            (
-              ($h == "pre-edit-guard.sh" and ($p == "planning" or $p == "reviewing" or $p == "plan_review" or $p == "config_planning" or $p == "config_plan_review" or $p == "config_editing"))
-              or ($h == "agent-dispatch-guard.sh")
-              or ($h == "pr-template-guard.sh")
-              or ($h == "worktree-guard.sh" and ($p == "idle" or ($p | startswith("config_"))))
-              or ($h == "guardian-worktree-guard.sh")
-            )
-          ) | not
-        )
-    '
+    if [ "$PRESET_LOADED" != true ]; then
+      # T13: opt-in notice mechanism (one-shot per install)
+      NOTICE_ACK="$MARKER_DIR/.v3.1-opt-in-notice.ack"
+      if [ ! -f "$NOTICE_ACK" ]; then
+        NOTICE_FILE="$REPORT_DIR/error-reporter-notice-$(date +%s).md"
+        NOTICE_BODY='# error-reporter v3.1 notice
+
+error-reporter 3.1 handles Stop/SubagentStop reporting through an opt-in preset.
+Without a preset configured, these events are silently ignored (StopFailure reporting
+still works).
+
+To enable Stop/SubagentStop reporting, configure a preset:
+
+    export ERROR_REPORTER_PRESET=<preset name>
+    export ERROR_REPORTER_REPO=<github owner/repo>
+
+Shipped presets are listed in the plugin README (section "Presets"). If you upgraded
+from v3.0 and used this plugin with claude-harness, the preset you want is
+`claude-harness`.
+
+This notice fires once per install.'
+        printf '%s\n' "$NOTICE_BODY" > "$NOTICE_FILE" 2>/dev/null
+        chmod 600 "$NOTICE_FILE" 2>/dev/null
+        touch "$NOTICE_ACK" 2>/dev/null
+        log_line "[$TS] status=opt_in_notice event=$EVENT sid=$SESSION"
+      fi
+      exit 0
+    fi
+    LOG_FILE=${PRESET_DEBUG_LOG_PATH_TPL//\{session_id\}/$SESSION}
+    STATE_FILE=${PRESET_STATE_FILE_PATH_TPL//\{session_id\}/$SESSION}
+    [ -f "$LOG_FILE" ] || exit 0
+    [ -z "$PRESET_DENY_FILTER_JQ" ] && exit 0
+
     if [ "$EVENT" = "SubagentStop" ] && [ -n "$AGENT_ID" ]; then
-      BLOCK_COUNT=$(jq -r --arg aid "$AGENT_ID" "$EXPECTED_DENY_FILTER | select(.agent_id == \$aid or .agent_id == null) | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
-      TRIGGER_HOOK=$(jq -r --arg aid "$AGENT_ID" "$EXPECTED_DENY_FILTER | select(.agent_id == \$aid or .agent_id == null) | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
+      BLOCK_COUNT=$(jq -r --arg aid "$AGENT_ID" "$PRESET_DENY_FILTER_JQ | select(.agent_id == \$aid or .agent_id == null) | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
+      TRIGGER_HOOK=$(jq -r --arg aid "$AGENT_ID" "$PRESET_DENY_FILTER_JQ | select(.agent_id == \$aid or .agent_id == null) | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
     else
-      BLOCK_COUNT=$(jq -r "$EXPECTED_DENY_FILTER | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
-      TRIGGER_HOOK=$(jq -r "$EXPECTED_DENY_FILTER | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
+      BLOCK_COUNT=$(jq -r "$PRESET_DENY_FILTER_JQ | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
+      TRIGGER_HOOK=$(jq -r "$PRESET_DENY_FILTER_JQ | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
     fi
     [ "${BLOCK_COUNT:-0}" -lt 1 ] && exit 0
     ;;
@@ -143,72 +478,52 @@ case "$EVENT" in
     ;;
 esac
 
-# === Phase 1: Synchronous snapshot (fast, file reads only) ===
-STATE_SNAPSHOT=$(cat "$STATE_FILE" 2>/dev/null || echo '{}')
-PHASE=$(echo "$STATE_SNAPSHOT" | jq -r '.phase // "unknown"')
-TRIGGER_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-DEBUG_LOG_TAIL=$(tail -50 "$LOG_FILE" 2>/dev/null)
+# === Phase 1: Synchronous snapshot (preset-gated reads) ===
+STATE_SNAPSHOT='{}'
+PHASE="unknown"
+DEBUG_LOG_TAIL=""
 TRANSCRIPT_TAIL=""
+
+if [ "$PRESET_LOADED" = true ] && [ -n "$STATE_FILE" ] && [ -f "$STATE_FILE" ]; then
+  STATE_SNAPSHOT=$(cat "$STATE_FILE" 2>/dev/null || echo '{}')
+  PHASE=$(echo "$STATE_SNAPSHOT" | jq -r '.phase // "unknown"')
+fi
+
+if [ "$PRESET_LOADED" = true ] && [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+  DEBUG_LOG_TAIL=$(tail -50 "$LOG_FILE" 2>/dev/null)
+fi
+
 [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] && TRANSCRIPT_TAIL=$(tail -20 "$TRANSCRIPT" 2>/dev/null)
 
-# --- Severity classification ---
-# StopFailure → A1 (coordination failure — session ended abnormally)
-# Stop with block/deny → A2 (guard recovered — hooks caught the problem)
-# SubagentStop with block/deny → A2 (guard recovered)
-# Timeout errors → A3 (resource exceeded)
-SEVERITY="A2-guard-recovered"
-case "$EVENT" in
-  StopFailure)
-    if echo "$SF_ERROR" | grep -qi 'timeout'; then
-      SEVERITY="A3-resource"
-    else
-      SEVERITY="A1-coordination"
-    fi
-    ;;
-esac
+TRIGGER_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-# --- Domain inference (issue #15 refactor) ---
-#
-# Classify the incident into a reporter:domain:* bucket. Two signals:
-#
-# 1. $AGENT_ID truthy → reporter:domain:agent. **No allowlist.** The harness
-#    already gates which agent_id values reach a SubagentStop event via
-#    subagent-validate.sh + settings.json hook matchers, so any value that
-#    gets here is by definition a real agent invocation. Plugin-provided
-#    agents (skill-creator's grader/comparator/analyzer, code-simplifier,
-#    etc.) are handled automatically — no per-plugin update needed. This
-#    replaces the earlier hardcoded `planner|tdd-implementer|config-*`
-#    allowlist that had drifted from the real roster. See issue #15 and the
-#    5-engineer review panel findings (Approach D).
-#
-# 2. $TRIGGER_HOOK = the single hook that tripped the threshold, extracted
-#    from EXPECTED_DENY_FILTER | tail -1 (set in the case arm above). This
-#    replaces the earlier "sort -u over all hooks + first match wins" logic,
-#    which was alphabetically arbitrary and often misclassified incidents.
+# Severity from preset (or "unknown" if preset not loaded)
+SEVERITY=$(_resolve_severity "$EVENT" "$SF_ERROR")
+
+# Domain inference
 infer_domain() {
-  [ -n "$AGENT_ID" ] && { echo "reporter:domain:agent"; return; }
-  case "$TRIGGER_HOOK" in
-    *config-worktree*|*config-agent*|*config-guardian*) echo "reporter:domain:hook"; return ;;
-    *pre-edit*|*verify-before*|*pr-template*|*pr-review*) echo "reporter:domain:hook"; return ;;
-    *delegation*|*subagent-validate*|*tdd-dispatch*) echo "reporter:domain:hook"; return ;;
-    *session-recovery*|*state-recovery*|*compact*|*preflight*) echo "reporter:domain:infra"; return ;;
-  esac
-  echo "reporter:domain:hook"
+  if [ -n "$AGENT_ID" ]; then
+    echo "reporter:domain:agent"
+    return
+  fi
+  if [ "$PRESET_LOADED" = true ]; then
+    _preset_domain_lookup "$TRIGGER_HOOK"
+    return
+  fi
+  if [ "$EVENT" = "StopFailure" ]; then
+    echo "reporter:domain:infra"
+  else
+    echo "reporter:domain:hook"
+  fi
 }
 DOMAIN=$(infer_domain)
 
-# --- Agent field (issue #15 refactor) ---
-# Trust $AGENT_ID verbatim — see infer_domain() comment. The existing
-# ${AGENT_FIELD:+...} guards in the subshell handle the empty case naturally.
 AGENT_FIELD="$AGENT_ID"
 
 # === Phase 2: Fork to background — all network I/O happens here ===
 (
-  LOCK_DIR="/tmp/claude-report-${SESSION}.lock"
-  # Stale-lock reclamation: SIGKILL / OOM / host crash can leave the lockdir
-  # behind — because it's keyed on $SESSION, every subsequent invocation in
-  # the same session would `exit 0` at this point and re-introduce the very
-  # silent-loss class this script is meant to fix. Reclaim if >5 min old.
+  LOCK_DIR="$LOCK_ROOT/${SESSION}.lock"
+  # Stale-lock reclamation (>5 min mtime): SIGKILL/OOM/host crash recovery.
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
       rmdir "$LOCK_DIR" 2>/dev/null
@@ -219,9 +534,8 @@ AGENT_FIELD="$AGENT_ID"
   fi
   trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
-  # Opportunistic sweep of leftovers from crashed sessions on long-lived hosts
-  # (macOS does not auto-purge /tmp). 7-day TTL matches harness handoff-history.
-  find /tmp -maxdepth 1 \( -name 'claude-report-*.lock' -o -name 'claude-report-*.reported' \) -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+  # Opportunistic sweep of leftovers (7-day TTL).
+  find "$MARKER_DIR" "$LOCK_ROOT" -maxdepth 1 \( -name '*.lock' -o -name '*.reported' \) -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 
   TITLE="[incident] $EVENT${AGENT_ID:+($AGENT_ID)} (${SESSION:0:8})"
 
@@ -266,44 +580,7 @@ $INPUT
 
 <!-- Suspected root cause — fill in manually -->"
 
-  REPORT_REPO="pmmm114/claude-harness-engineering"
-
-  # --- Diagnostic log (error-reporter.log) configuration ---
-  ERROR_LOG_MAX=1000
-  ERROR_LOG_KEEP=500
-  ERROR_LOG_DIR="${CLAUDE_PLUGIN_DATA:-$HOME/.claude/reports}/logs"
-  ERROR_LOG_FILE="$ERROR_LOG_DIR/error-reporter.log"
-
-  # log_line <line> — append to error-reporter.log with a first-line-preserving
-  # ring-buffer trim, 0600 perm hardening (gh stderr can contain auth token
-  # fragments on some failure modes), and a $$-scoped temp file to avoid
-  # cross-session races on the trim step.
-  log_line() {
-    mkdir -p "$ERROR_LOG_DIR" 2>/dev/null || return
-    printf '%s\n' "$1" >> "$ERROR_LOG_FILE" 2>/dev/null || return
-    chmod 600 "$ERROR_LOG_FILE" 2>/dev/null || true
-    local n
-    # BSD wc (macOS) prints leading whitespace — tr -d ' ' is load-bearing
-    # here, not cosmetic. Without it `[ "   104" -gt 1000 ]` throws and the
-    # ring buffer silently disables on macOS.
-    n=$(wc -l < "$ERROR_LOG_FILE" 2>/dev/null | tr -d ' ')
-    if [ "${n:-0}" -gt "$ERROR_LOG_MAX" ]; then
-      { head -1 "$ERROR_LOG_FILE"; tail -$((ERROR_LOG_KEEP - 1)) "$ERROR_LOG_FILE"; } \
-        > "${ERROR_LOG_FILE}.$$.tmp" 2>/dev/null \
-        && mv "${ERROR_LOG_FILE}.$$.tmp" "$ERROR_LOG_FILE" 2>/dev/null
-    fi
-  }
-
-  # --- Always-local archive (E3-R6): write the fallback .md BEFORE attempting
-  # gh so the observation body is retained even on gh success. If the target
-  # repo is ever deleted/privated/rotated, the local archive remains. Storage
-  # is cheap; post-hoc forensics are not. Also dramatically shortens the
-  # failure path — if the local write is the only successful sink, the marker
-  # is still touched and the session is dedup'd as usual.
-  REPORT_DIR="${CLAUDE_PLUGIN_DATA:-$HOME/.claude/reports}/reports"
-  mkdir -p "$REPORT_DIR" 2>/dev/null || true
-  # Subshell PID + epoch second: two failures in the same session within the
-  # same second cannot collide (a real hazard under marker-gated retry).
+  # Always-local archive (write before gh attempt)
   FALLBACK_FILE="$REPORT_DIR/${SESSION}-$(date +%s)-$$.md"
   LOCAL_OK=false
   if printf '%s\n' "$REPORT_BODY" > "$FALLBACK_FILE" 2>/dev/null; then
@@ -311,11 +588,12 @@ $INPUT
     LOCAL_OK=true
   fi
 
-  # --- Primary sink: gh issue create on the central observation-log repo ---
+  # Primary sink: gh issue create — gated on REPORT_REPO non-empty
   GH_OK=false
-  TS=$(date -u +%s)
-  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    # Pre-create required labels; gh exits non-zero if they already exist — suppressed via || true
+  if [ -z "$REPORT_REPO" ]; then
+    log_line "$(printf '[%s] status=skip event=%s sid=%s reason=repo_not_configured local=%s' \
+      "$TS" "$EVENT" "$SESSION" "$LOCAL_OK")"
+  elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     gh label create "type:incident" --description "Immediate response needed" --color "D73A4A" --repo "$REPORT_REPO" 2>/dev/null || true
     gh label create "auto:hook-failure" --description "Auto-generated by error-reporter" --color "EDEDED" --repo "$REPORT_REPO" 2>/dev/null || true
     gh label create "severity:$SEVERITY" --description "" --color "FFA500" --repo "$REPORT_REPO" 2>/dev/null || true
@@ -325,11 +603,6 @@ $INPUT
     LABELS="type:incident,auto:hook-failure,severity:${SEVERITY},${DOMAIN}"
     [ -n "$AGENT_FIELD" ] && LABELS="${LABELS},reporter:agent:${AGENT_FIELD}"
 
-    # Capture stderr + exit status. On success log an audit breadcrumb
-    # (empty log == reporter never ran, not "healthy" — disambiguating per
-    # E3 review dissent); on failure log a structured diagnostic. The local
-    # .md file above already archived the full body, so a gh failure here
-    # never means observation loss (pmmm114/kb-cc-plugin#10).
     GH_STDERR=$(gh issue create \
       --repo "$REPORT_REPO" \
       --title "$TITLE" \
@@ -342,18 +615,13 @@ $INPUT
         "$TS" "$EVENT" "$SESSION" "$PHASE" "${AGENT_FIELD:-none}" "$DOMAIN" "$TRIGGER_COMMIT" "$LOCAL_OK")"
       GH_OK=true
     else
-      # Cap gh stderr to 512 bytes and normalize newlines so one failure
-      # occupies one grep-able line that stays under PIPE_BUF (4096 B) for
-      # atomic append under concurrent sessions.
       GH_STDERR_ONELINE=$(printf '%s' "$GH_STDERR" | tr '\n\r' '  ' | cut -c1-512)
       log_line "$(printf '[%s] status=fail event=%s sid=%s phase=%s agent=%s domain=%s commit=%s local=%s exit=%d stderr=%q' \
         "$TS" "$EVENT" "$SESSION" "$PHASE" "${AGENT_FIELD:-none}" "$DOMAIN" "$TRIGGER_COMMIT" "$LOCAL_OK" "$GH_EXIT" "$GH_STDERR_ONELINE")"
     fi
   fi
 
-  # --- Session-dedup marker: touch if ANY sink succeeded. If BOTH gh and
-  # local write failed, marker stays absent so the next event in the same
-  # session retries instead of going silent for the rest of the session.
+  # Session-dedup marker: touch if ANY sink succeeded
   if [ "$GH_OK" = true ] || [ "$LOCAL_OK" = true ]; then
     touch "$MARKER"
   fi
