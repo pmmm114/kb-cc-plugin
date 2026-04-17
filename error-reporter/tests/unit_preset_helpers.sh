@@ -57,10 +57,11 @@ if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '"a.sh"'; then
 else
   pass "case 1a: empty-phases rule for a.sh skipped"
 fi
-if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '"b.sh"'; then
-  pass "case 1b: wildcard rule for b.sh emitted"
+# P0-1: rule hook names are normalized (.sh stripped) so $h == "b" instead of "b.sh"
+if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '"b"'; then
+  pass "case 1b: wildcard rule for b (bare) emitted"
 else
-  fail "case 1b: b.sh missing from filter"
+  fail "case 1b: b missing from filter"
 fi
 # Outer prelude check
 if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF 'select(.decision == "block" or .decision == "deny")'; then
@@ -72,8 +73,8 @@ fi
 # Case 2: * wildcard
 PRESET_DENY_RULES_JSON='[{"hook":"c.sh","phases":["*"]}]'
 _build_deny_filter
-if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '($h == "c.sh")'; then
-  pass 'case 2a: wildcard emits ($h == "c.sh")'
+if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '($h == "c")'; then
+  pass 'case 2a: wildcard emits ($h == "c") (bare after P0-1 normalization)'
 else
   fail "case 2a: wildcard emission incorrect"
 fi
@@ -93,8 +94,8 @@ if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '$p == "x"' && \
 else
   fail "case 3a: phase disjunction missing components"
 fi
-# 3-layer parens: (($h == "d.sh") and (...))
-if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '(($h == "d.sh") and ('; then
+# 3-layer parens: (($h == "d") and (...)) — P0-1 normalizes hook name
+if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '(($h == "d") and ('; then
   pass "case 3b: 3-layer parenthesization present"
 else
   fail "case 3b: 3-layer parens missing — operator precedence risk"
@@ -127,7 +128,9 @@ fi
 # ============================================================================
 printf '\nSection B: _resolve_severity timeout branch\n'
 
-# Load the real preset for severity tests
+# Load the real preset for severity tests.
+# _load_preset requires CLAUDE_PLUGIN_ROOT to locate the preset file.
+export CLAUDE_PLUGIN_ROOT="$REPO_ROOT/error-reporter"
 _load_preset claude-harness 2>/dev/null
 if [ "$PRESET_LOADED" != true ]; then
   fail "Section B precondition: failed to load claude-harness preset"

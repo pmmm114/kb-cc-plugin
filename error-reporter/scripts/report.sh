@@ -177,9 +177,12 @@ _build_deny_filter() {
   if [ -n "$hook_pat" ]; then
     local pat_lit
     pat_lit=$(printf '%s' "$hook_pat" | jq -Rs .)
-    PRESET_HOOK_EXTRACT_JQ="(((.reason // \"\") | capture($pat_lit)? | .h // \"\") // (.hook // \"\"))"
+    # Strip trailing ".sh" from the extracted value regardless of source so
+    # rule clauses (which use bare names) match whether the producer emitted
+    # "pre-edit-guard" or "pre-edit-guard.sh".
+    PRESET_HOOK_EXTRACT_JQ="(((((.reason // \"\") | capture($pat_lit)? | .h // \"\") // (.hook // \"\")) | sub(\"\\\\.sh$\"; \"\")))"
   else
-    PRESET_HOOK_EXTRACT_JQ='(.hook // "")'
+    PRESET_HOOK_EXTRACT_JQ='((.hook // "") | sub("\\.sh$"; ""))'
   fi
 
   if [ "$count" -eq 0 ]; then
