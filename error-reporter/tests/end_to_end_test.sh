@@ -89,7 +89,7 @@ printf '%s\n' "$OUT" | grep -q "no side effects" && pass "T1 no-side-effects ban
 printf '%s\n' "$OUT" | grep -qF '[ok]   preset: claude-harness (loaded)' && pass "T1 preset loaded line" || fail "T1 preset loaded line"
 # gh stub not in PATH for this test — real gh may or may not reach dummy/repo
 # So we only check the prefix, not reachable vs unreachable
-printf '%s\n' "$OUT" | grep -qE '(target repo reachable|target repo unreachable): dummy/repo' && pass "T1 target repo line" || fail "T1 target repo line"
+printf '%s\n' "$OUT" | grep -qE 'target repo: dummy/repo \(source=env, (reachable|\?)\)|target repo unreachable: dummy/repo \(source=env\)' && pass "T1 target repo line" || fail "T1 target repo line"
 rm -rf "$TD"
 
 # --- Test 2 (migrated): SubagentStop + agent_id=editor (preset mode) ---
@@ -237,10 +237,14 @@ else
   fail "T6b no fallback .md"
 fi
 LOG_FILE="$TD/logs/error-reporter.log"
-[ -f "$LOG_FILE" ] && grep -q 'status=skip.*reason=repo_not_configured' "$LOG_FILE" \
-  && pass "T6b log has status=skip reason=repo_not_configured" \
-  || fail "T6b missing skip breadcrumb"
-[ ! -f "$TD/gh-was-called" ] && pass "T6b gh NOT invoked (skip path)" || fail "T6b gh was called — skip path broken"
+if [ -f "$LOG_FILE" ]; then
+  N=$(grep -c 'status=fail.*reason=repo_resolution_failed' "$LOG_FILE" 2>/dev/null)
+  [ "${N:-0}" -eq 1 ] && pass "T6b log has status=fail reason=repo_resolution_failed (exactly 1)" \
+    || fail "T6b expected exactly 1 fail breadcrumb, got ${N:-0}"
+else
+  fail "T6b log missing"
+fi
+[ ! -f "$TD/gh-was-called" ] && pass "T6b gh NOT invoked (fail path)" || fail "T6b gh was called — fail path broken"
 cleanup_session "$SID" "$TD"
 
 # --- Test 7: Preset filter equivalence — routine + incident ---
@@ -310,9 +314,13 @@ wait_for_background "$SID" "$TD/markers"
 FALLBACK_FILE=$(ls "$TD/reports/${SID}-"*".md" 2>/dev/null | head -1)
 [ -n "$FALLBACK_FILE" ] && pass "T9 fallback .md written" || fail "T9 no fallback .md"
 LOG_FILE="$TD/logs/error-reporter.log"
-[ -f "$LOG_FILE" ] && grep -q 'status=skip.*reason=repo_not_configured' "$LOG_FILE" \
-  && pass "T9 status=skip reason=repo_not_configured (exactly 1)" \
-  || fail "T9 missing skip breadcrumb"
+if [ -f "$LOG_FILE" ]; then
+  N=$(grep -c 'status=fail.*reason=repo_resolution_failed' "$LOG_FILE" 2>/dev/null)
+  [ "${N:-0}" -eq 1 ] && pass "T9 status=fail reason=repo_resolution_failed (exactly 1)" \
+    || fail "T9 expected exactly 1 fail breadcrumb, got ${N:-0}"
+else
+  fail "T9 log missing"
+fi
 [ ! -f "$TD/gh-was-called" ] && pass "T9 gh NOT invoked" || fail "T9 gh was called"
 cleanup_session "$SID" "$TD"
 
@@ -368,7 +376,7 @@ OUT=$(CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
 RC=$?
 [ "$RC" -eq 0 ] && pass "T12a exit 0" || fail "T12a exit $RC"
 printf '%s\n' "$OUT" | grep -qF '[ok]   preset: claude-harness (loaded)' && pass "T12a preset loaded" || fail "T12a preset loaded line"
-printf '%s\n' "$OUT" | grep -qF '[ok]   target repo reachable: dummy/repo' && pass "T12a target repo reachable" || fail "T12a target repo line"
+printf '%s\n' "$OUT" | grep -qF '[ok]   target repo: dummy/repo (source=env, reachable)' && pass "T12a target repo reachable" || fail "T12a target repo line"
 AFTER_DIR_COUNT=$(find "$TD" -type d | wc -l | tr -d ' ')
 [ "$SETUP_DIR_COUNT" = "$AFTER_DIR_COUNT" ] && pass "T12a F1 verified (no dirs created)" || fail "T12a F1 violation (dirs: $SETUP_DIR_COUNT → $AFTER_DIR_COUNT)"
 rm -rf "$TD"
@@ -389,7 +397,7 @@ chmod +x "$TD/bin/gh"
 OUT=$(CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
   ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo \
   PATH="$TD/bin:$PATH" bash "$SCRIPT" --self-test 2>&1)
-printf '%s\n' "$OUT" | grep -qF '[WARN] target repo unreachable: dummy/repo' && pass "T12b target repo unreachable" || fail "T12b target repo line"
+printf '%s\n' "$OUT" | grep -qF '[WARN] target repo unreachable: dummy/repo (source=env)' && pass "T12b target repo unreachable" || fail "T12b target repo line"
 rm -rf "$TD"
 
 # 12c: preset none + repo configured
@@ -408,25 +416,31 @@ chmod +x "$TD/bin/gh"
 OUT=$(CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
   ERROR_REPORTER_REPO=dummy/repo PATH="$TD/bin:$PATH" \
   bash -c "unset ERROR_REPORTER_PRESET; bash '$SCRIPT' --self-test" 2>&1)
-printf '%s\n' "$OUT" | grep -qF '[ok]   preset: none (generic mode)' && pass "T12c preset none (generic)" || fail "T12c preset line"
-printf '%s\n' "$OUT" | grep -qF '[ok]   target repo reachable: dummy/repo' && pass "T12c target repo reachable" || fail "T12c target repo line"
+RC=$?
+# P0-2: preset unset now FAILs (was "none generic mode" in v3.1). Exit non-zero.
+[ "$RC" -eq 1 ] && pass "T12c exit 1 (preset unset → FAIL)" || fail "T12c exit $RC (expected 1 after P0-2)"
+printf '%s\n' "$OUT" | grep -qF '[FAIL] preset: not configured' && pass "T12c preset FAIL line" || fail "T12c preset FAIL line"
+printf '%s\n' "$OUT" | grep -qF '[ok]   target repo: dummy/repo (source=env, reachable)' && pass "T12c target repo reachable" || fail "T12c target repo line"
 rm -rf "$TD"
 
-# 12d: preset none + repo unset
+# 12d: preset none + repo unset (both FAIL under P0-2)
 TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
-OUT=$(CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+# P0-5: unset HOME-like vars so CWD detection also fails — must run in a /tmp dir that isn't a git repo.
+OUT=$(cd "$TD" && CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
   bash -c "unset ERROR_REPORTER_PRESET ERROR_REPORTER_REPO; bash '$SCRIPT' --self-test" 2>&1)
-printf '%s\n' "$OUT" | grep -qF '[ok]   preset: none (generic mode)' && pass "T12d preset none" || fail "T12d preset line"
-printf '%s\n' "$OUT" | grep -qF '[WARN] target repo: not configured (gh-skip mode)' && pass "T12d target repo not configured" || fail "T12d target repo line"
+RC=$?
+[ "$RC" -eq 1 ] && pass "T12d exit 1 (preset+repo unset → FAIL)" || fail "T12d exit $RC (expected 1 after P0-2)"
+printf '%s\n' "$OUT" | grep -qF '[FAIL] preset: not configured' && pass "T12d preset FAIL line" || fail "T12d preset FAIL line"
+printf '%s\n' "$OUT" | grep -qF '[FAIL] target repo: not resolvable' && pass "T12d target repo FAIL line" || fail "T12d target repo FAIL line"
 rm -rf "$TD"
 
-# 12e: CLAUDE_PLUGIN_ROOT unset (R2 graceful degrade)
+# 12e: CLAUDE_PLUGIN_ROOT unset (P0-2 escalates to FAIL + exit 1)
 TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
-OUT=$(CLAUDE_PLUGIN_DATA="$TD" \
+OUT=$(cd "$TD" && CLAUDE_PLUGIN_DATA="$TD" \
   bash -c "unset CLAUDE_PLUGIN_ROOT ERROR_REPORTER_PRESET ERROR_REPORTER_REPO; bash '$SCRIPT' --self-test" 2>&1)
 RC=$?
-[ "$RC" -eq 0 ] && pass "T12e exit 0 (no abort)" || fail "T12e exit $RC"
-printf '%s\n' "$OUT" | grep -qF '[WARN] preset: cannot check (CLAUDE_PLUGIN_ROOT unset)' && pass "T12e R2 WARN line" || fail "T12e R2 WARN line"
+[ "$RC" -eq 1 ] && pass "T12e exit 1 (CLAUDE_PLUGIN_ROOT unset → FAIL)" || fail "T12e exit $RC (expected 1 after P0-2)"
+printf '%s\n' "$OUT" | grep -qF '[FAIL] preset: cannot check (CLAUDE_PLUGIN_ROOT unset)' && pass "T12e FAIL line" || fail "T12e FAIL line"
 rm -rf "$TD"
 
 # --- Test 10: Malformed preset (MUST run last — manipulates CLAUDE_PLUGIN_ROOT) ---

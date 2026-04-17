@@ -3,6 +3,9 @@
   "name": "claude-harness",
   "debug_log_path": "/tmp/claude-debug/{session_id}.jsonl",
   "state_file_path": "/tmp/claude-session/{session_id}.json",
+  "hook_extraction": {
+    "pattern": "\\[sid:[^\\]]+\\] \\[(?<h>[^\\]]+)\\]"
+  },
   "routine_deny_rules": [
     {
       "hook": "pre-edit-guard.sh",

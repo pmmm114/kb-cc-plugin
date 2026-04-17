@@ -35,6 +35,61 @@ Prerequisites:
 - `gh` CLI with authentication (optional — when absent or unset, only local
   Markdown archives are written)
 
+## 2.1 Setup
+
+### Default behavior
+
+`error-reporter` auto-detects the target GitHub repository from the CWD's git
+remote — no `ERROR_REPORTER_REPO` export required when running inside a git
+repo (EPIC #20 Design Principle 4). `ERROR_REPORTER_PRESET` is still opt-in
+and must be set explicitly; there is no environment default.
+
+### Option A — per-shell env vars
+
+```bash
+export ERROR_REPORTER_PRESET=claude-harness
+# ERROR_REPORTER_REPO is optional — CWD git remote auto-detected
+export ERROR_REPORTER_REPO=<owner/repo>   # force override only
+```
+
+### Option B — persistent config.json
+
+```bash
+mkdir -p "$CLAUDE_PLUGIN_DATA/error-reporter"
+cat > "$CLAUDE_PLUGIN_DATA/error-reporter/config.json" <<EOF
+{"preset": "claude-harness"}
+EOF
+```
+
+`repo` is optional; omitting it enables CWD auto-detection at runtime.
+
+### Verify
+
+```bash
+bash "$CLAUDE_PLUGIN_ROOT/error-reporter/scripts/report.sh" --self-test
+# Expected on success (excerpt — full output also prints dependencies + activity):
+#   [ok]   jq: jq-1.6
+#   [ok]   gh: gh version ...
+#   [ok]   gh auth: authenticated
+#   [ok]   preset: claude-harness (loaded)
+#   [ok]   target repo: <owner>/<repo> (source=cwd:hook, reachable)
+```
+
+`source=<env|config|cwd:hook|preset>` tells you which resolution layer
+provided the repo (see §4 `hook_extraction` / §7 log schema for the full
+fallback chain).
+
+`--self-test` exits non-zero (`1`) when preset is missing, repo cannot be
+resolved, or `CLAUDE_PLUGIN_ROOT` is unset — useful for onboarding checks
+and CI integration.
+
+**Upgrader note (3.0.x / 3.1.x → 3.2)**: after upgrade, `error-reporter.log`
+gains a `status=silent_skip reason=preset_not_loaded` line **per Stop /
+SubagentStop event** (not just the one-shot `opt_in_notice`) until a preset
+is configured. This is intentional — it surfaces the preset-unset state to
+on-call. Configure `ERROR_REPORTER_PRESET=claude-harness` to silence the
+breadcrumb.
+
 ## 3. Generic mode
 
 Without any configuration, `error-reporter` handles `StopFailure` events:
@@ -43,9 +98,11 @@ Without any configuration, `error-reporter` handles `StopFailure` events:
 2. Classifies severity — in generic mode every StopFailure lands as
    `severity:unknown` (see below).
 3. Writes a Markdown archive at `$CLAUDE_PLUGIN_DATA/reports/<sid>-<ts>-<pid>.md`.
-4. If `ERROR_REPORTER_REPO` is set, files a GitHub issue on that repo;
-   otherwise skips the `gh` call and writes a `status=skip
-   reason=repo_not_configured` breadcrumb to `error-reporter.log`.
+4. Resolves the target repo via the 3.2+ fallback chain (env
+   `ERROR_REPORTER_REPO` → `config.json.repo` → CWD git remote → `preset.repo`).
+   If resolved and `gh auth` is good, files a GitHub issue; if resolution
+   fails it writes a `status=fail reason=repo_resolution_failed` breadcrumb
+   (the local `.md` archive from step 3 still stands).
 5. `exit 0`, always.
 
 `Stop` and `SubagentStop` events are ignored in generic mode — they produce a
@@ -82,6 +139,10 @@ files exist on disk.
   "name": "<preset-name>",
   "debug_log_path": "/some/path/{session_id}.jsonl",
   "state_file_path": "/some/path/{session_id}.json",
+  "hook_extraction": {
+    "pattern": "<jq-regex-with-named-group-h>"
+  },
+  "repo": "<owner/repo>",
   "routine_deny_rules": [
     { "hook": "<filename.sh>", "phases": ["<literal>", "<prefix>_*", "*"] }
   ],
@@ -101,13 +162,31 @@ Field notes:
 
 - `debug_log_path` and `state_file_path` MUST contain the literal
   `{session_id}` placeholder; the plugin substitutes at runtime.
+- `hook_extraction.pattern` (optional) — jq-compatible regex with a named
+  group `h` that captures the real firing hook name from the debug-log
+  entry's `.reason` field. Defensive against upstream loggers that record
+  a library-level wrapper in `.hook` instead of the firing script (e.g.,
+  the `_HOOK_CALLER` drift in claude-harness — see upstream
+  pmmm114/claude-harness-engineering#99). When set, the extracted value is
+  normalized by stripping a trailing `.sh` and `routine_deny_rules` hook
+  names are compared bare (so rules can be written as `pre-edit-guard` or
+  `pre-edit-guard.sh` interchangeably). **Omitting `hook_extraction`
+  preserves pre-3.2 behavior**: `.hook` field is used verbatim, rule hook
+  names match with the `.sh` suffix intact, and `TRIGGER_HOOK` downstream
+  (domain inference, `reporter:agent:*` label emission) keeps the suffixed
+  form. Legacy presets keep working unchanged.
+  Note on JSON escape: regex `\[` is written as `\\[` in a JSON string
+  (the shipped `presets/claude-harness.json` demonstrates this).
+- `repo` (optional) — last-resort fallback for target repo when env var,
+  `config.json.repo`, and CWD git-remote detection all miss. Use for
+  ephemeral CWDs (e.g., benchmark scratch dirs).
 - `routine_deny_rules.phases` supports three forms: exact literal, `prefix_*`
   (matches any phase starting with `prefix_`), and `*` (matches any phase).
   An empty array skips the rule entirely.
 - `domain_rules.match` uses shell `case` pipe-glob syntax — different dialect
   from `phases`, do not conflate.
 - The filter generator hardcodes JSONL field names (`ts`, `decision`, `hook`,
-  `phase`, `agent_id`, `event`); see §8.
+  `phase`, `agent_id`, `event`, `reason`); see §8.
 
 ### Shipped presets
 
@@ -185,14 +264,18 @@ with upgrade instructions. `StopFailure` reporting is unaffected.
 bash $CLAUDE_PLUGIN_ROOT/error-reporter/scripts/report.sh --self-test
 ```
 
-Expected lines (abridged):
+Expected lines (abridged, v3.2+):
 
 ```
 [ok]   preset: claude-harness (loaded)
-[ok]   target repo reachable: pmmm114/claude-harness   # or your configured repo
+[ok]   target repo: <owner>/<repo> (source=<env|config|cwd:hook|preset>, reachable)
 ```
 
-If either line differs, revisit the env exports above.
+`source=` tells you which fallback layer provided the repo. If `preset:`
+shows `[FAIL]` or `target repo:` shows `[FAIL] … not resolvable`, revisit
+the env exports / `config.json` (see §2.1 Setup). `--self-test` returns
+non-zero when any critical config is missing (v3.2 breaking change — see
+§7 Self-test).
 
 ## 7. Local archive, self-test, troubleshooting
 
@@ -219,6 +302,15 @@ bash report.sh --self-test
 Diagnoses dependency health, preset status, target repo reachability, and
 recent activity. Has zero side effects (no issues created, no files written).
 
+**Exit code (breaking change vs 3.0.x)**: since 3.1, `--self-test` exits
+non-zero (`1`) when any critical config is missing — `CLAUDE_PLUGIN_ROOT`
+unset, preset unconfigured, preset bad schema, or target repo unresolvable.
+Previously all such conditions emitted `[WARN]` and exited `0`. This makes
+the self-test usable as a CI / onboarding gate. Scripts that relied on
+`bash report.sh --self-test && echo ok` should either configure the preset
+or explicitly tolerate the exit via `|| true` where the WARN behavior is
+intended.
+
 ### Diagnostic log format
 
 `error-reporter.log` uses a single-line key=value format:
@@ -226,18 +318,31 @@ recent activity. Has zero side effects (no issues created, no files written).
 ```
 [<epoch>] status=ok         event=... sid=... phase=... agent=... domain=... commit=... local=...
 [<epoch>] status=fail       event=... sid=... phase=... ... exit=<N> stderr=<quoted>
-[<epoch>] status=skip       event=... sid=... reason=repo_not_configured local=...
-[<epoch>] status=opt_in_notice event=... sid=...
+[<epoch>] status=opt_in_notice   event=... sid=...
 [<epoch>] status=preset_bad_schema preset=<name> reason=<...>
+[<epoch>] status=silent_skip     event=... sid=... reason=preset_not_loaded
+[<epoch>] status=fail            event=... sid=... phase=... agent=... domain=... commit=... reason=repo_resolution_failed source=<none|env|config|cwd:hook|preset> hook_cwd=<quoted> local=<true|false>
 ```
+
+Additional status semantics:
+
+- `silent_skip` — emitted **per event** when `ERROR_REPORTER_PRESET` is unset.
+  Surfaces repeated silent skips to on-call without blocking the hook chain.
+  Coexists with the one-shot `opt_in_notice` (which fires only on the first
+  event until the ack file is deleted).
+- `repo_resolution_failed` — appears on `status=fail` rows when all four
+  fallbacks (env `ERROR_REPORTER_REPO`, `config.json.repo`, hook-input `.cwd` →
+  git remote, preset `.repo` field) yielded an empty result. Logged as
+  `status=fail` (not `status=skip`) per Phase 0 P0-5 design so it does not
+  get lost in routine skip noise. `source=none` indicates no fallback matched.
 
 ## 8. Known limitations
 
 The filter generator hardcodes JSONL field names (`ts`, `decision`, `hook`,
-`phase`, `agent_id`, `event`). Alternative log producers must conform to this
-schema or extend the filter generator. Out of scope for v3.1. Preset
-`schema_version: 1` is a forward-compatibility hook for future schema-aware
-versions.
+`phase`, `agent_id`, `event`, `reason`). Alternative log producers must
+conform to this schema or extend the filter generator. Out of scope for
+v3.2. Preset `schema_version: 1` is a forward-compatibility hook for
+future schema-aware versions.
 
 ## 9. Coupling Surface
 
@@ -261,5 +366,5 @@ Preset files inject all of the above. The `claude-harness` preset is the
 reference implementation; third-party presets are welcomed and documented in §4.
 
 Known limitation: the filter generator hardcodes JSONL field names (`ts`,
-`decision`, `hook`, `phase`, `agent_id`, `event`). Alternative log producers
-must conform to this schema. See §8.
+`decision`, `hook`, `phase`, `agent_id`, `event`, `reason`). Alternative
+log producers must conform to this schema. See §8.

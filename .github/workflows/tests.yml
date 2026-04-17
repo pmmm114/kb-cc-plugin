@@ -18,5 +18,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq
-      - name: Run smoke test
+      - name: end_to_end_test.sh
         run: bash error-reporter/tests/end_to_end_test.sh
+      - name: unit_preset_helpers.sh
+        run: bash error-reporter/tests/unit_preset_helpers.sh
+      - name: unit_resolve_repo.sh
+        run: bash error-reporter/tests/unit_resolve_repo.sh
+      - name: verify_preset_equivalence.sh
+        run: bash error-reporter/tests/verify_preset_equivalence.sh

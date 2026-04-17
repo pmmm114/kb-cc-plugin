@@ -27,7 +27,7 @@ pass() { printf '  [OK] %s\n' "$1"; PASS=$((PASS + 1)); }
 fail() { printf '  [FAIL] %s\n' "$1"; FAIL=$((FAIL + 1)); }
 warn() { printf '  [WARN] %s\n' "$1"; WARN=$((WARN + 1)); }
 
-printf 'error-reporter v3.1 regression smoke\n'
+printf 'error-reporter v3.2 regression smoke\n'
 printf '=====================================\n\n'
 
 # --- 1. Shell-profile env ---
@@ -43,24 +43,32 @@ else
   warn "ERROR_REPORTER_REPO not set — gh-skip mode (local archive only)"
 fi
 
-# --- 2. --self-test output ---
+# --- 2. --self-test output (v3.2: exit 1 when preset/repo missing) ---
 printf '\n2. --self-test output:\n'
 OUT=$(CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" bash "$SCRIPT" --self-test 2>&1)
 RC=$?
-[ "$RC" -eq 0 ] && pass "self-test exit 0" || fail "self-test exit $RC"
+if [ -n "${ERROR_REPORTER_PRESET:-}" ]; then
+  [ "$RC" -eq 0 ] && pass "self-test exit 0 (preset configured)" || fail "self-test exit $RC (expected 0 with preset set)"
+else
+  [ "$RC" -eq 1 ] && pass "self-test exit 1 (preset unset → FAIL, by design in v3.2)" \
+    || warn "self-test exit $RC (v3.2 expects 1 when preset unset; check env)"
+fi
 if printf '%s\n' "$OUT" | grep -qF "[ok]   preset: ${ERROR_REPORTER_PRESET:-claude-harness} (loaded)"; then
   pass "preset line shows loaded"
-elif printf '%s\n' "$OUT" | grep -q 'preset: none'; then
-  warn "preset line shows generic mode — env var missing?"
+elif printf '%s\n' "$OUT" | grep -qF '[FAIL] preset:'; then
+  warn "preset FAIL line — env var missing (expected if ERROR_REPORTER_PRESET unset)"
 else
   fail "unexpected preset line"
 fi
-if printf '%s\n' "$OUT" | grep -q 'target repo reachable:'; then
-  pass "target repo reachable"
-elif printf '%s\n' "$OUT" | grep -q 'target repo: not configured'; then
-  warn "target repo: not configured (gh-skip active)"
-else
+# v3.2: target repo line now includes source=<env|config|cwd:hook|preset>
+if printf '%s\n' "$OUT" | grep -qE 'target repo: [^ ]+ \(source=[^,]+, reachable\)'; then
+  pass "target repo reachable (with source attribution)"
+elif printf '%s\n' "$OUT" | grep -qE 'target repo unreachable:.*source='; then
   warn "target repo unreachable (gh not authenticated or repo private?)"
+elif printf '%s\n' "$OUT" | grep -qF '[FAIL] target repo: not resolvable'; then
+  warn "target repo: not resolvable (set ERROR_REPORTER_REPO or run inside a github git repo)"
+else
+  fail "unexpected target repo line (format changed since v3.1?)"
 fi
 
 # --- 3. Synthetic incident injection (preset path) ---
@@ -114,7 +122,7 @@ rm -rf "$TD"
 # --- Summary ---
 printf '\nSummary: %d OK, %d WARN, %d FAIL\n' "$PASS" "$WARN" "$FAIL"
 if [ "$FAIL" -eq 0 ]; then
-  printf 'Regression smoke passed. Your v3.1 upgrade is functional.\n'
+  printf 'Regression smoke passed. Your v3.2 upgrade is functional.\n'
   exit 0
 else
   printf 'Regression smoke FAILED. Investigate before relying on incident reporting.\n'

@@ -31,7 +31,12 @@ PRESET_DOMAIN_RULES_JSON=""
 PRESET_DEFAULT_DOMAIN=""
 PRESET_SEVERITY_RULES_JSON=""
 PRESET_DENY_FILTER_JQ=""
+PRESET_HOOK_EXTRACT_JQ='(.hook // "")'
+PRESET_REPO=""
+PRESET_HOOK_EXTRACTION_JSON=""
 REPORT_REPO=""
+REPORT_REPO_SOURCE=""
+HOOK_CWD=""
 
 # --- log_line: append + ring-buffer trim (callable pre-fork or in-fork) ---
 log_line() {
@@ -62,19 +67,114 @@ _resolve_preset_name() {
   fi
 }
 
-# --- _resolve_repo: env > config.json > empty ---
+# --- _resolve_repo_from_cwd <cwd>: extract owner/repo from git remote.origin.url ---
+# Stdout: "owner/repo" on success (exit 0). Empty + exit 1 on failure.
+# No gh call — uses git only (~11ms). Handles:
+#   https://github.com/OWNER/REPO(.git)?
+#   git@github.com:OWNER/REPO(.git)?
+#   ssh://git@github.com(:PORT)?/OWNER/REPO(.git)?
+#
+# Filters out non-github hosts (gh CLI backing). Filters to two-segment paths
+# (rejects nested groups like gitlab-style `group/subgroup/repo`). Accepts
+# GitHub Enterprise via `*.github.*` pattern.
+_resolve_repo_from_cwd() {
+  local cwd="$1"
+  [ -z "$cwd" ] && return 1
+  [ -d "$cwd" ] || return 1
+  git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  local url
+  url=$(git -C "$cwd" config --get remote.origin.url 2>/dev/null)
+  [ -z "$url" ] && return 1
+
+  # Parse host + path with explicit variants. BASH_REMATCH reliable on bash 3.2+.
+  local host path
+  if [[ "$url" =~ ^https?://([^/]+)/(.+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    path="${BASH_REMATCH[2]}"
+  elif [[ "$url" =~ ^ssh://git@([^:/]+)(:[0-9]+)?/(.+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    path="${BASH_REMATCH[3]}"
+  elif [[ "$url" =~ ^git@([^:/]+):(.+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    path="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+
+  # Case-insensitive host matching (bash 3.2 compat — use tr, not ${var,,}).
+  # GitHub owner/repo paths ARE case-sensitive, so we lowercase host only.
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  case "$host" in
+    github.com|*.github.com|github.*|*.github.*) ;;
+    *) return 1 ;;
+  esac
+
+  # Normalize path: strip trailing slash FIRST, then .git suffix — order matters
+  # for URLs written as "owner/repo.git/" (slash after .git).
+  path="${path%/}"
+  path="${path%.git}"
+  path="${path%/}"
+
+  # Accept exactly "owner/repo" (two segments). Reject nested groups.
+  case "$path" in
+    */*/*) return 1 ;;
+    */*) printf '%s' "$path"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# --- _resolve_repo: populates REPORT_REPO + REPORT_REPO_SOURCE globals ---
+# Fallback chain (EPIC #20 Design Principle 4):
+#   1. env ERROR_REPORTER_REPO         (force override)
+#   2. config.json .repo               (persistent user override)
+#   3. hook-input .cwd → git remote    (default: current context repo)
+#   4. preset.repo                     (last-resort static fallback)
+#   5. empty + source="none"           (caller logs status=fail)
+# Idempotent via _REPORT_REPO_CACHED. Safe to call from self-test (HOOK_CWD empty).
 _resolve_repo() {
+  [ "${_REPORT_REPO_CACHED:-0}" = "1" ] && return
+  REPORT_REPO=""
+  REPORT_REPO_SOURCE=""
+
   if [ -n "${ERROR_REPORTER_REPO:-}" ]; then
     REPORT_REPO="$ERROR_REPORTER_REPO"
+    REPORT_REPO_SOURCE="env"
+    _REPORT_REPO_CACHED=1
     return
   fi
+
   local cfg="$ER_BASE/error-reporter/config.json"
   if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1; then
     local from_cfg
     from_cfg=$(jq -r '.repo // empty' "$cfg" 2>/dev/null)
-    [ -n "$from_cfg" ] && { REPORT_REPO="$from_cfg"; return; }
+    if [ -n "$from_cfg" ]; then
+      REPORT_REPO="$from_cfg"
+      REPORT_REPO_SOURCE="config"
+      _REPORT_REPO_CACHED=1
+      return
+    fi
   fi
+
+  if [ -n "$HOOK_CWD" ]; then
+    local from_cwd
+    if from_cwd=$(_resolve_repo_from_cwd "$HOOK_CWD") && [ -n "$from_cwd" ]; then
+      REPORT_REPO="$from_cwd"
+      REPORT_REPO_SOURCE="cwd:hook"
+      _REPORT_REPO_CACHED=1
+      return
+    fi
+  fi
+
+  if [ "$PRESET_LOADED" = true ] && [ -n "$PRESET_REPO" ]; then
+    REPORT_REPO="$PRESET_REPO"
+    REPORT_REPO_SOURCE="preset"
+    _REPORT_REPO_CACHED=1
+    return
+  fi
+
   REPORT_REPO=""
+  REPORT_REPO_SOURCE="none"
+  _REPORT_REPO_CACHED=1
 }
 
 # --- _build_deny_filter: produces $PRESET_DENY_FILTER_JQ from PRESET_DENY_RULES_JSON ---
@@ -86,12 +186,50 @@ _resolve_repo() {
 #   - 3-layer parens mandatory; rules joined with top-level OR
 #   - outer select(.decision == "block" or .decision == "deny") prelude preserved
 #   - F4: do NOT dedupe rules (one OR clause per input entry, in order)
+#
+# P0-1 (defensive against _HOOK_CALLER upstream drift):
+#   - If preset declares .hook_extraction.pattern, build $h from .reason via
+#     jq capture (named group "h"), falling back to .hook field on miss.
+#     Rule hook names normalized by stripping ".sh" suffix to match the bare
+#     guard names typically found in the extracted bracket.
+#   - If no hook_extraction, legacy $h = .hook // "".
+#   - Extraction expression also exposed as $PRESET_HOOK_EXTRACT_JQ for
+#     the TRIGGER_HOOK lookup downstream.
+#
+# Preset-author warning: because fallback strips ".sh", do NOT use a bare
+# library wrapper name (e.g., "hook-lib") as a rule hook. With the harness
+# _HOOK_CALLER drift active, .hook == "hook-lib.sh" → normalized "hook-lib";
+# a rule keyed on "hook-lib" would incorrectly match every library-emitted
+# entry whose reason lacks the guard-bracket prefix.
 _build_deny_filter() {
   local rules="$PRESET_DENY_RULES_JSON"
   [ -z "$rules" ] && rules='[]'
   local count
   count=$(printf '%s' "$rules" | jq 'length' 2>/dev/null)
   count=${count:-0}
+
+  # Build hook-extraction expression from preset (or fall back to .hook field).
+  # Two modes:
+  #   (A) preset.hook_extraction.pattern set → capture from .reason, fallback
+  #       to .hook, strip trailing ".sh" for symmetric bare-name matching.
+  #       This is the P0-1 defensive path against _HOOK_CALLER upstream drift.
+  #   (B) no hook_extraction → legacy .hook verbatim. TRIGGER_HOOK preserves
+  #       the pre-3.2 ".sh"-suffixed value that downstream consumers (issue
+  #       title, label emission) expected. Rule hook names in the preset also
+  #       stay un-normalized, so existing presets continue to match as before.
+  local hook_pat=""
+  if [ -n "$PRESET_HOOK_EXTRACTION_JSON" ] && [ "$PRESET_HOOK_EXTRACTION_JSON" != "null" ]; then
+    hook_pat=$(printf '%s' "$PRESET_HOOK_EXTRACTION_JSON" | jq -r '.pattern // empty' 2>/dev/null)
+  fi
+  local normalize_rule_hook=0
+  if [ -n "$hook_pat" ]; then
+    local pat_lit
+    pat_lit=$(printf '%s' "$hook_pat" | jq -Rs .)
+    PRESET_HOOK_EXTRACT_JQ="(((((.reason // \"\") | capture($pat_lit)? | .h // \"\") // (.hook // \"\")) | sub(\"\\\\.sh$\"; \"\")))"
+    normalize_rule_hook=1
+  else
+    PRESET_HOOK_EXTRACT_JQ='(.hook // "")'
+  fi
 
   if [ "$count" -eq 0 ]; then
     PRESET_DENY_FILTER_JQ='select(.decision == "block" or .decision == "deny")'
@@ -108,8 +246,17 @@ _build_deny_filter() {
 
     [ "$plen" -eq 0 ] && { i=$((i + 1)); continue; }
 
+    # P0-1: when preset opts into reason-prefix extraction, strip ".sh" from
+    # rule hook names so comparison is bare-to-bare. Legacy presets keep the
+    # ".sh" suffix verbatim (TRIGGER_HOOK / downstream labels preserved).
+    local hook_bare
+    if [ "$normalize_rule_hook" = "1" ]; then
+      hook_bare="${hook%.sh}"
+    else
+      hook_bare="$hook"
+    fi
     local hook_lit
-    hook_lit=$(printf '%s' "$hook" | jq -Rs .)
+    hook_lit=$(printf '%s' "$hook_bare" | jq -Rs .)
 
     local has_star=false
     local phase_disjunction=""
@@ -164,7 +311,7 @@ _build_deny_filter() {
   PRESET_DENY_FILTER_JQ="
     select(.decision == \"block\" or .decision == \"deny\")
     | select(
-        ( (.hook // \"\") as \$h | (.phase // \"\") as \$p | ( $parts ) ) | not
+        ( ($PRESET_HOOK_EXTRACT_JQ) as \$h | (.phase // \"\") as \$p | ( $parts ) ) | not
       )
   "
 }
@@ -186,6 +333,8 @@ _load_preset() {
   PRESET_DEFAULT_DOMAIN=""
   PRESET_SEVERITY_RULES_JSON=""
   PRESET_DENY_FILTER_JQ=""
+  PRESET_REPO=""
+  PRESET_HOOK_EXTRACTION_JSON=""
 
   [ -z "$name" ] && return
   command -v jq >/dev/null 2>&1 || return
@@ -241,6 +390,8 @@ _load_preset() {
   PRESET_DOMAIN_RULES_JSON=$(jq -c '.domain_rules // []' "$file" 2>/dev/null)
   PRESET_DEFAULT_DOMAIN=$(jq -r '.default_domain // "reporter:domain:hook"' "$file" 2>/dev/null)
   PRESET_SEVERITY_RULES_JSON=$(jq -c '.severity_rules // {}' "$file" 2>/dev/null)
+  PRESET_REPO=$(jq -r '.repo // empty' "$file" 2>/dev/null)
+  PRESET_HOOK_EXTRACTION_JSON=$(jq -c '.hook_extraction // null' "$file" 2>/dev/null)
   PRESET_NAME="$name"
   PRESET_LOADED=true
 
@@ -302,11 +453,16 @@ _resolve_severity() {
 # === Self-test mode: pure diagnostics, no side effects ===
 if [ "${1:-}" = "--self-test" ]; then
   printf 'error-reporter self-test\n========================\n\n'
+  # P0-5: use $PWD as HOOK_CWD proxy so repo resolution exercises the CWD path.
+  HOOK_CWD="$PWD"
+  # P0-2: track non-zero exit when any critical config is missing.
+  _SELFTEST_EXIT=0
   printf 'dependencies:\n'
   if command -v jq >/dev/null 2>&1; then
     printf '  [ok]   jq: %s\n' "$(jq --version 2>/dev/null)"
   else
     printf '  [FAIL] jq: not found — error-reporter will exit 0 silently on all events\n'
+    _SELFTEST_EXIT=1
   fi
   if command -v gh >/dev/null 2>&1; then
     printf '  [ok]   gh: %s\n' "$(gh --version 2>/dev/null | head -1)"
@@ -319,9 +475,10 @@ if [ "${1:-}" = "--self-test" ]; then
     printf '  [WARN] gh auth: not authenticated — fallback-only mode\n'
   fi
 
-  # R2 fix: soft-degradation when CLAUDE_PLUGIN_ROOT is unset
+  # P0-2: escalate preset-missing to FAIL — Stop/SubagentStop silently skip without a preset.
   if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-    printf '  [WARN] preset: cannot check (CLAUDE_PLUGIN_ROOT unset)\n'
+    printf '  [FAIL] preset: cannot check (CLAUDE_PLUGIN_ROOT unset) — Stop/SubagentStop silently skipped. See README §2.1 Setup.\n'
+    _SELFTEST_EXIT=1
   else
     _resolved_preset=$(_resolve_preset_name)
     if [ -n "$_resolved_preset" ]; then
@@ -329,20 +486,23 @@ if [ "${1:-}" = "--self-test" ]; then
       if [ "$PRESET_LOADED" = true ]; then
         printf '  [ok]   preset: %s (loaded)\n' "$PRESET_NAME"
       else
-        printf '  [FAIL] preset: %s (bad_schema)\n' "$_resolved_preset"
+        printf '  [FAIL] preset: %s (bad_schema) — Stop/SubagentStop silently skipped. See README §2.1 Setup.\n' "$_resolved_preset"
+        _SELFTEST_EXIT=1
       fi
     else
-      printf '  [ok]   preset: none (generic mode)\n'
+      printf '  [FAIL] preset: not configured — Stop/SubagentStop silently skipped. Export ERROR_REPORTER_PRESET or write $CLAUDE_PLUGIN_DATA/error-reporter/config.json. See README §2.1 Setup.\n'
+      _SELFTEST_EXIT=1
     fi
   fi
 
   _resolve_repo
   if [ -z "$REPORT_REPO" ]; then
-    printf '  [WARN] target repo: not configured (gh-skip mode)\n'
+    printf '  [FAIL] target repo: not resolvable — set ERROR_REPORTER_REPO, write config.json, or run inside a git repo with a remote. See README §2.1 Setup.\n'
+    _SELFTEST_EXIT=1
   elif command -v gh >/dev/null 2>&1 && gh repo view "$REPORT_REPO" >/dev/null 2>&1; then
-    printf '  [ok]   target repo reachable: %s\n' "$REPORT_REPO"
+    printf '  [ok]   target repo: %s (source=%s, reachable)\n' "$REPORT_REPO" "$REPORT_REPO_SOURCE"
   else
-    printf '  [WARN] target repo unreachable: %s\n' "$REPORT_REPO"
+    printf '  [WARN] target repo unreachable: %s (source=%s)\n' "$REPORT_REPO" "$REPORT_REPO_SOURCE"
   fi
 
   printf '\ndata dir:\n'
@@ -391,7 +551,8 @@ if [ "${1:-}" = "--self-test" ]; then
   fi
   printf '  markers: %s reported, %s lockdirs\n' "${_SELF_TEST_MARKERS:-0}" "${_SELF_TEST_LOCKS:-0}"
   printf '\n(no side effects: no issues created, no files written)\n'
-  exit 0
+  # P0-2: exit non-zero when any critical config is missing (CI / onboarding gate).
+  exit "${_SELFTEST_EXIT:-0}"
 fi
 
 # === Main path: hook event processing ===
@@ -400,6 +561,9 @@ command -v jq >/dev/null 2>&1 || { echo "error-reporter: jq not found" >&2; exit
 INPUT=$(cat)
 EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // ""')
 SESSION=$(echo "$INPUT" | jq -r '.session_id // ""')
+# P0-5: hook-input .cwd is authoritative for agent-subprocess working directory.
+# Used by _resolve_repo to derive target repo from current git remote.
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // ""')
 
 [ -z "$SESSION" ] && exit 0
 
@@ -432,23 +596,29 @@ case "$EVENT" in
     ;;
   Stop|SubagentStop)
     if [ "$PRESET_LOADED" != true ]; then
-      # T13: opt-in notice mechanism (one-shot per install)
+      # P0-3: per-event silent_skip breadcrumb so operators can detect silent
+      # loss even after the one-shot opt_in_notice has been ack'd.
+      log_line "$(printf '[%s] status=silent_skip event=%s sid=%s reason=preset_not_loaded' \
+        "$TS" "$EVENT" "$SESSION")"
+      # T13: opt-in notice mechanism (one-shot per install).
+      # Ack filename keeps the ".v3.1" suffix deliberately so upgraders from 3.1
+      # do NOT re-receive the notice on first run of 3.2 (the ack is still valid).
       NOTICE_ACK="$MARKER_DIR/.v3.1-opt-in-notice.ack"
       if [ ! -f "$NOTICE_ACK" ]; then
         NOTICE_FILE="$REPORT_DIR/error-reporter-notice-$(date +%s).md"
-        NOTICE_BODY='# error-reporter v3.1 notice
+        NOTICE_BODY='# error-reporter v3.2 notice
 
-error-reporter 3.1 handles Stop/SubagentStop reporting through an opt-in preset.
+error-reporter 3.2 handles Stop/SubagentStop reporting through an opt-in preset.
 Without a preset configured, these events are silently ignored (StopFailure reporting
-still works).
+still works, and the target repo is auto-detected from the CWD git remote since 3.2).
 
 To enable Stop/SubagentStop reporting, configure a preset:
 
     export ERROR_REPORTER_PRESET=<preset name>
-    export ERROR_REPORTER_REPO=<github owner/repo>
+    # ERROR_REPORTER_REPO is optional — CWD git remote is auto-detected
 
 Shipped presets are listed in the plugin README (section "Presets"). If you upgraded
-from v3.0 and used this plugin with claude-harness, the preset you want is
+from v3.0/3.1 and used this plugin with claude-harness, the preset you want is
 `claude-harness`.
 
 This notice fires once per install.'
@@ -466,10 +636,10 @@ This notice fires once per install.'
 
     if [ "$EVENT" = "SubagentStop" ] && [ -n "$AGENT_ID" ]; then
       BLOCK_COUNT=$(jq -r --arg aid "$AGENT_ID" "$PRESET_DENY_FILTER_JQ | select(.agent_id == \$aid or .agent_id == null) | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
-      TRIGGER_HOOK=$(jq -r --arg aid "$AGENT_ID" "$PRESET_DENY_FILTER_JQ | select(.agent_id == \$aid or .agent_id == null) | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
+      TRIGGER_HOOK=$(jq -r --arg aid "$AGENT_ID" "$PRESET_DENY_FILTER_JQ | select(.agent_id == \$aid or .agent_id == null) | $PRESET_HOOK_EXTRACT_JQ // empty" "$LOG_FILE" 2>/dev/null | tail -1)
     else
       BLOCK_COUNT=$(jq -r "$PRESET_DENY_FILTER_JQ | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
-      TRIGGER_HOOK=$(jq -r "$PRESET_DENY_FILTER_JQ | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
+      TRIGGER_HOOK=$(jq -r "$PRESET_DENY_FILTER_JQ | $PRESET_HOOK_EXTRACT_JQ // empty" "$LOG_FILE" 2>/dev/null | tail -1)
     fi
     [ "${BLOCK_COUNT:-0}" -lt 1 ] && exit 0
     ;;
@@ -591,8 +761,14 @@ $INPUT
   # Primary sink: gh issue create — gated on REPORT_REPO non-empty
   GH_OK=false
   if [ -z "$REPORT_REPO" ]; then
-    log_line "$(printf '[%s] status=skip event=%s sid=%s reason=repo_not_configured local=%s' \
-      "$TS" "$EVENT" "$SESSION" "$LOCAL_OK")"
+    # P0-5: classify as FAIL (not skip) when all 4 fallbacks (env/config/cwd/preset.repo)
+    # returned empty. Local .md is always written (above) so observable trace is preserved.
+    # Field order mirrors the status=ok/fail lines below so key=value log consumers
+    # can parse uniformly (phase/agent/domain/commit present, plus the new reason/source/hook_cwd).
+    # hook_cwd is quoted because paths with spaces would otherwise break key=value
+    # tokenizers (e.g., "/Users/John Doe/proj" → "hook_cwd=/Users/John" + orphan).
+    log_line "$(printf '[%s] status=fail event=%s sid=%s phase=%s agent=%s domain=%s commit=%s reason=repo_resolution_failed source=%s hook_cwd=%q local=%s' \
+      "$TS" "$EVENT" "$SESSION" "$PHASE" "${AGENT_FIELD:-none}" "$DOMAIN" "$TRIGGER_COMMIT" "${REPORT_REPO_SOURCE:-unknown}" "${HOOK_CWD:-}" "$LOCAL_OK")"
   elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     gh label create "type:incident" --description "Immediate response needed" --color "D73A4A" --repo "$REPORT_REPO" 2>/dev/null || true
     gh label create "auto:hook-failure" --description "Auto-generated by error-reporter" --color "EDEDED" --repo "$REPORT_REPO" 2>/dev/null || true
