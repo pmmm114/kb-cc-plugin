@@ -31,7 +31,11 @@ PRESET_DOMAIN_RULES_JSON=""
 PRESET_DEFAULT_DOMAIN=""
 PRESET_SEVERITY_RULES_JSON=""
 PRESET_DENY_FILTER_JQ=""
+PRESET_REPO=""
+PRESET_HOOK_EXTRACTION_JSON=""
 REPORT_REPO=""
+REPORT_REPO_SOURCE=""
+HOOK_CWD=""
 
 # --- log_line: append + ring-buffer trim (callable pre-fork or in-fork) ---
 log_line() {
@@ -62,19 +66,81 @@ _resolve_preset_name() {
   fi
 }
 
-# --- _resolve_repo: env > config.json > empty ---
+# --- _resolve_repo_from_cwd <cwd>: extract owner/repo from git remote.origin.url ---
+# Stdout: "owner/repo" on success (exit 0). Empty + exit 1 on failure.
+# No gh call — uses git only (~11ms). Handles https / ssh / git@ URL variants.
+_resolve_repo_from_cwd() {
+  local cwd="$1"
+  [ -z "$cwd" ] && return 1
+  [ -d "$cwd" ] || return 1
+  git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  local url
+  url=$(git -C "$cwd" config --get remote.origin.url 2>/dev/null)
+  [ -z "$url" ] && return 1
+  local slug
+  slug=$(printf '%s' "$url" \
+    | sed -E -e 's|^https?://[^/]+/||' \
+             -e 's|^(ssh://)?git@[^:/]+[:/]||' \
+             -e 's|\.git/?$||' \
+             -e 's|/+$||')
+  case "$slug" in
+    */*) printf '%s' "$slug"; return 0 ;;
+    *)   return 1 ;;
+  esac
+}
+
+# --- _resolve_repo: populates REPORT_REPO + REPORT_REPO_SOURCE globals ---
+# Fallback chain (EPIC #20 Design Principle 4):
+#   1. env ERROR_REPORTER_REPO         (force override)
+#   2. config.json .repo               (persistent user override)
+#   3. hook-input .cwd → git remote    (default: current context repo)
+#   4. preset.repo                     (last-resort static fallback)
+#   5. empty + source="none"           (caller logs status=fail)
+# Idempotent via _REPORT_REPO_CACHED. Safe to call from self-test (HOOK_CWD empty).
 _resolve_repo() {
+  [ "${_REPORT_REPO_CACHED:-0}" = "1" ] && return
+  REPORT_REPO=""
+  REPORT_REPO_SOURCE=""
+
   if [ -n "${ERROR_REPORTER_REPO:-}" ]; then
     REPORT_REPO="$ERROR_REPORTER_REPO"
+    REPORT_REPO_SOURCE="env"
+    _REPORT_REPO_CACHED=1
     return
   fi
+
   local cfg="$ER_BASE/error-reporter/config.json"
   if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1; then
     local from_cfg
     from_cfg=$(jq -r '.repo // empty' "$cfg" 2>/dev/null)
-    [ -n "$from_cfg" ] && { REPORT_REPO="$from_cfg"; return; }
+    if [ -n "$from_cfg" ]; then
+      REPORT_REPO="$from_cfg"
+      REPORT_REPO_SOURCE="config"
+      _REPORT_REPO_CACHED=1
+      return
+    fi
   fi
+
+  if [ -n "$HOOK_CWD" ]; then
+    local from_cwd
+    if from_cwd=$(_resolve_repo_from_cwd "$HOOK_CWD") && [ -n "$from_cwd" ]; then
+      REPORT_REPO="$from_cwd"
+      REPORT_REPO_SOURCE="cwd:hook"
+      _REPORT_REPO_CACHED=1
+      return
+    fi
+  fi
+
+  if [ "$PRESET_LOADED" = true ] && [ -n "$PRESET_REPO" ]; then
+    REPORT_REPO="$PRESET_REPO"
+    REPORT_REPO_SOURCE="preset"
+    _REPORT_REPO_CACHED=1
+    return
+  fi
+
   REPORT_REPO=""
+  REPORT_REPO_SOURCE="none"
+  _REPORT_REPO_CACHED=1
 }
 
 # --- _build_deny_filter: produces $PRESET_DENY_FILTER_JQ from PRESET_DENY_RULES_JSON ---
@@ -186,6 +252,8 @@ _load_preset() {
   PRESET_DEFAULT_DOMAIN=""
   PRESET_SEVERITY_RULES_JSON=""
   PRESET_DENY_FILTER_JQ=""
+  PRESET_REPO=""
+  PRESET_HOOK_EXTRACTION_JSON=""
 
   [ -z "$name" ] && return
   command -v jq >/dev/null 2>&1 || return
@@ -241,6 +309,8 @@ _load_preset() {
   PRESET_DOMAIN_RULES_JSON=$(jq -c '.domain_rules // []' "$file" 2>/dev/null)
   PRESET_DEFAULT_DOMAIN=$(jq -r '.default_domain // "reporter:domain:hook"' "$file" 2>/dev/null)
   PRESET_SEVERITY_RULES_JSON=$(jq -c '.severity_rules // {}' "$file" 2>/dev/null)
+  PRESET_REPO=$(jq -r '.repo // empty' "$file" 2>/dev/null)
+  PRESET_HOOK_EXTRACTION_JSON=$(jq -c '.hook_extraction // null' "$file" 2>/dev/null)
   PRESET_NAME="$name"
   PRESET_LOADED=true
 
@@ -302,6 +372,8 @@ _resolve_severity() {
 # === Self-test mode: pure diagnostics, no side effects ===
 if [ "${1:-}" = "--self-test" ]; then
   printf 'error-reporter self-test\n========================\n\n'
+  # P0-5: use $PWD as HOOK_CWD proxy so repo resolution exercises the CWD path.
+  HOOK_CWD="$PWD"
   printf 'dependencies:\n'
   if command -v jq >/dev/null 2>&1; then
     printf '  [ok]   jq: %s\n' "$(jq --version 2>/dev/null)"
@@ -340,9 +412,9 @@ if [ "${1:-}" = "--self-test" ]; then
   if [ -z "$REPORT_REPO" ]; then
     printf '  [WARN] target repo: not configured (gh-skip mode)\n'
   elif command -v gh >/dev/null 2>&1 && gh repo view "$REPORT_REPO" >/dev/null 2>&1; then
-    printf '  [ok]   target repo reachable: %s\n' "$REPORT_REPO"
+    printf '  [ok]   target repo: %s (source=%s, reachable)\n' "$REPORT_REPO" "$REPORT_REPO_SOURCE"
   else
-    printf '  [WARN] target repo unreachable: %s\n' "$REPORT_REPO"
+    printf '  [WARN] target repo unreachable: %s (source=%s)\n' "$REPORT_REPO" "$REPORT_REPO_SOURCE"
   fi
 
   printf '\ndata dir:\n'
@@ -400,6 +472,9 @@ command -v jq >/dev/null 2>&1 || { echo "error-reporter: jq not found" >&2; exit
 INPUT=$(cat)
 EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // ""')
 SESSION=$(echo "$INPUT" | jq -r '.session_id // ""')
+# P0-5: hook-input .cwd is authoritative for agent-subprocess working directory.
+# Used by _resolve_repo to derive target repo from current git remote.
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // ""')
 
 [ -z "$SESSION" ] && exit 0
 
