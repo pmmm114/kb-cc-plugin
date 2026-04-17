@@ -35,6 +35,46 @@ Prerequisites:
 - `gh` CLI with authentication (optional — when absent or unset, only local
   Markdown archives are written)
 
+## 2.1 Setup
+
+### Default behavior
+
+`error-reporter` auto-detects the target GitHub repository from the CWD's git
+remote — no `ERROR_REPORTER_REPO` export required when running inside a git
+repo (EPIC #20 Design Principle 4). `ERROR_REPORTER_PRESET` is still opt-in
+and must be set explicitly; there is no environment default.
+
+### Option A — per-shell env vars
+
+```bash
+export ERROR_REPORTER_PRESET=claude-harness
+# ERROR_REPORTER_REPO is optional — CWD git remote auto-detected
+export ERROR_REPORTER_REPO=<owner/repo>   # force override only
+```
+
+### Option B — persistent config.json
+
+```bash
+mkdir -p "$CLAUDE_PLUGIN_DATA/error-reporter"
+cat > "$CLAUDE_PLUGIN_DATA/error-reporter/config.json" <<EOF
+{"preset": "claude-harness"}
+EOF
+```
+
+`repo` is optional; omitting it enables CWD auto-detection at runtime.
+
+### Verify
+
+```bash
+bash "$CLAUDE_PLUGIN_ROOT/error-reporter/scripts/report.sh" --self-test
+# Expected lines (on success):
+#   [ok]   preset: claude-harness (loaded)
+#   [ok]   target repo: pmmm114/<your-repo> (resolved from cwd)
+```
+
+`--self-test` exits non-zero when preset is missing — useful for onboarding
+checks and CI integration.
+
 ## 3. Generic mode
 
 Without any configuration, `error-reporter` handles `StopFailure` events:
@@ -229,7 +269,21 @@ recent activity. Has zero side effects (no issues created, no files written).
 [<epoch>] status=skip       event=... sid=... reason=repo_not_configured local=...
 [<epoch>] status=opt_in_notice event=... sid=...
 [<epoch>] status=preset_bad_schema preset=<name> reason=<...>
+[<epoch>] status=silent_skip     event=... sid=... reason=preset_not_loaded
+[<epoch>] status=fail            event=... sid=... reason=repo_resolution_failed source=<none|...> hook_cwd=<...> local=<true|false>
 ```
+
+Additional status semantics:
+
+- `silent_skip` — emitted **per event** when `ERROR_REPORTER_PRESET` is unset.
+  Surfaces repeated silent skips to on-call without blocking the hook chain.
+  Coexists with the one-shot `opt_in_notice` (which fires only on the first
+  event until the ack file is deleted).
+- `repo_resolution_failed` — appears on `status=fail` rows when all four
+  fallbacks (env `ERROR_REPORTER_REPO`, `config.json.repo`, hook-input `.cwd` →
+  git remote, preset `.repo` field) yielded an empty result. Logged as
+  `status=fail` (not `status=skip`) per Phase 0 P0-5 design so it does not
+  get lost in routine skip noise. `source=none` indicates no fallback matched.
 
 ## 8. Known limitations
 
