@@ -31,6 +31,7 @@ PRESET_DOMAIN_RULES_JSON=""
 PRESET_DEFAULT_DOMAIN=""
 PRESET_SEVERITY_RULES_JSON=""
 PRESET_DENY_FILTER_JQ=""
+PRESET_HOOK_EXTRACT_JQ='(.hook // "")'
 PRESET_REPO=""
 PRESET_HOOK_EXTRACTION_JSON=""
 REPORT_REPO=""
@@ -152,12 +153,34 @@ _resolve_repo() {
 #   - 3-layer parens mandatory; rules joined with top-level OR
 #   - outer select(.decision == "block" or .decision == "deny") prelude preserved
 #   - F4: do NOT dedupe rules (one OR clause per input entry, in order)
+#
+# P0-1 (defensive against _HOOK_CALLER upstream drift):
+#   - If preset declares .hook_extraction.pattern, build $h from .reason via
+#     jq capture (named group "h"), falling back to .hook field on miss.
+#     Rule hook names normalized by stripping ".sh" suffix to match the bare
+#     guard names typically found in the extracted bracket.
+#   - If no hook_extraction, legacy $h = .hook // "".
+#   - Extraction expression also exposed as $PRESET_HOOK_EXTRACT_JQ for
+#     the TRIGGER_HOOK lookup downstream.
 _build_deny_filter() {
   local rules="$PRESET_DENY_RULES_JSON"
   [ -z "$rules" ] && rules='[]'
   local count
   count=$(printf '%s' "$rules" | jq 'length' 2>/dev/null)
   count=${count:-0}
+
+  # Build hook-extraction expression from preset (or fall back to .hook field).
+  local hook_pat=""
+  if [ -n "$PRESET_HOOK_EXTRACTION_JSON" ] && [ "$PRESET_HOOK_EXTRACTION_JSON" != "null" ]; then
+    hook_pat=$(printf '%s' "$PRESET_HOOK_EXTRACTION_JSON" | jq -r '.pattern // empty' 2>/dev/null)
+  fi
+  if [ -n "$hook_pat" ]; then
+    local pat_lit
+    pat_lit=$(printf '%s' "$hook_pat" | jq -Rs .)
+    PRESET_HOOK_EXTRACT_JQ="(((.reason // \"\") | capture($pat_lit)? | .h // \"\") // (.hook // \"\"))"
+  else
+    PRESET_HOOK_EXTRACT_JQ='(.hook // "")'
+  fi
 
   if [ "$count" -eq 0 ]; then
     PRESET_DENY_FILTER_JQ='select(.decision == "block" or .decision == "deny")'
@@ -174,8 +197,11 @@ _build_deny_filter() {
 
     [ "$plen" -eq 0 ] && { i=$((i + 1)); continue; }
 
+    # P0-1: strip .sh suffix from rule hook name. Extracted $h is bare guard
+    # (second-bracket form from hook-lib); comparing bare-to-bare is robust.
+    local hook_bare="${hook%.sh}"
     local hook_lit
-    hook_lit=$(printf '%s' "$hook" | jq -Rs .)
+    hook_lit=$(printf '%s' "$hook_bare" | jq -Rs .)
 
     local has_star=false
     local phase_disjunction=""
@@ -230,7 +256,7 @@ _build_deny_filter() {
   PRESET_DENY_FILTER_JQ="
     select(.decision == \"block\" or .decision == \"deny\")
     | select(
-        ( (.hook // \"\") as \$h | (.phase // \"\") as \$p | ( $parts ) ) | not
+        ( ($PRESET_HOOK_EXTRACT_JQ) as \$h | (.phase // \"\") as \$p | ( $parts ) ) | not
       )
   "
 }
@@ -541,10 +567,10 @@ This notice fires once per install.'
 
     if [ "$EVENT" = "SubagentStop" ] && [ -n "$AGENT_ID" ]; then
       BLOCK_COUNT=$(jq -r --arg aid "$AGENT_ID" "$PRESET_DENY_FILTER_JQ | select(.agent_id == \$aid or .agent_id == null) | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
-      TRIGGER_HOOK=$(jq -r --arg aid "$AGENT_ID" "$PRESET_DENY_FILTER_JQ | select(.agent_id == \$aid or .agent_id == null) | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
+      TRIGGER_HOOK=$(jq -r --arg aid "$AGENT_ID" "$PRESET_DENY_FILTER_JQ | select(.agent_id == \$aid or .agent_id == null) | $PRESET_HOOK_EXTRACT_JQ // empty" "$LOG_FILE" 2>/dev/null | tail -1)
     else
       BLOCK_COUNT=$(jq -r "$PRESET_DENY_FILTER_JQ | .decision" "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
-      TRIGGER_HOOK=$(jq -r "$PRESET_DENY_FILTER_JQ | .hook // empty" "$LOG_FILE" 2>/dev/null | tail -1)
+      TRIGGER_HOOK=$(jq -r "$PRESET_DENY_FILTER_JQ | $PRESET_HOOK_EXTRACT_JQ // empty" "$LOG_FILE" 2>/dev/null | tail -1)
     fi
     [ "${BLOCK_COUNT:-0}" -lt 1 ] && exit 0
     ;;
