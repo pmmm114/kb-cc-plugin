@@ -69,7 +69,14 @@ _resolve_preset_name() {
 
 # --- _resolve_repo_from_cwd <cwd>: extract owner/repo from git remote.origin.url ---
 # Stdout: "owner/repo" on success (exit 0). Empty + exit 1 on failure.
-# No gh call — uses git only (~11ms). Handles https / ssh / git@ URL variants.
+# No gh call — uses git only (~11ms). Handles:
+#   https://github.com/OWNER/REPO(.git)?
+#   git@github.com:OWNER/REPO(.git)?
+#   ssh://git@github.com(:PORT)?/OWNER/REPO(.git)?
+#
+# Filters out non-github hosts (gh CLI backing). Filters to two-segment paths
+# (rejects nested groups like gitlab-style `group/subgroup/repo`). Accepts
+# GitHub Enterprise via `*.github.*` pattern.
 _resolve_repo_from_cwd() {
   local cwd="$1"
   [ -z "$cwd" ] && return 1
@@ -78,15 +85,37 @@ _resolve_repo_from_cwd() {
   local url
   url=$(git -C "$cwd" config --get remote.origin.url 2>/dev/null)
   [ -z "$url" ] && return 1
-  local slug
-  slug=$(printf '%s' "$url" \
-    | sed -E -e 's|^https?://[^/]+/||' \
-             -e 's|^(ssh://)?git@[^:/]+[:/]||' \
-             -e 's|\.git/?$||' \
-             -e 's|/+$||')
-  case "$slug" in
-    */*) printf '%s' "$slug"; return 0 ;;
-    *)   return 1 ;;
+
+  # Parse host + path with explicit variants. BASH_REMATCH reliable on bash 3.2+.
+  local host path
+  if [[ "$url" =~ ^https?://([^/]+)/(.+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    path="${BASH_REMATCH[2]}"
+  elif [[ "$url" =~ ^ssh://git@([^:/]+)(:[0-9]+)?/(.+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    path="${BASH_REMATCH[3]}"
+  elif [[ "$url" =~ ^git@([^:/]+):(.+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    path="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+
+  # Only GitHub-family hosts are supported (gh CLI). Reject gitlab/bitbucket/etc.
+  case "$host" in
+    github.com|*.github.com|github.*|*.github.*) ;;
+    *) return 1 ;;
+  esac
+
+  # Normalize path: strip .git suffix and trailing slashes.
+  path="${path%.git}"
+  path="${path%/}"
+
+  # Accept exactly "owner/repo" (two segments). Reject nested groups.
+  case "$path" in
+    */*/*) return 1 ;;
+    */*) printf '%s' "$path"; return 0 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -162,6 +191,12 @@ _resolve_repo() {
 #   - If no hook_extraction, legacy $h = .hook // "".
 #   - Extraction expression also exposed as $PRESET_HOOK_EXTRACT_JQ for
 #     the TRIGGER_HOOK lookup downstream.
+#
+# Preset-author warning: because fallback strips ".sh", do NOT use a bare
+# library wrapper name (e.g., "hook-lib") as a rule hook. With the harness
+# _HOOK_CALLER drift active, .hook == "hook-lib.sh" → normalized "hook-lib";
+# a rule keyed on "hook-lib" would incorrectly match every library-emitted
+# entry whose reason lacks the guard-bracket prefix.
 _build_deny_filter() {
   local rules="$PRESET_DENY_RULES_JSON"
   [ -z "$rules" ] && rules='[]'

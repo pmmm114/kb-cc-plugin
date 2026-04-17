@@ -122,6 +122,10 @@ files exist on disk.
   "name": "<preset-name>",
   "debug_log_path": "/some/path/{session_id}.jsonl",
   "state_file_path": "/some/path/{session_id}.json",
+  "hook_extraction": {
+    "pattern": "<jq-regex-with-named-group-h>"
+  },
+  "repo": "<owner/repo>",
   "routine_deny_rules": [
     { "hook": "<filename.sh>", "phases": ["<literal>", "<prefix>_*", "*"] }
   ],
@@ -141,13 +145,26 @@ Field notes:
 
 - `debug_log_path` and `state_file_path` MUST contain the literal
   `{session_id}` placeholder; the plugin substitutes at runtime.
+- `hook_extraction.pattern` (optional) — jq-compatible regex with a named
+  group `h` that captures the real firing hook name from the debug-log
+  entry's `.reason` field. Defensive against upstream loggers that record
+  a library-level wrapper in `.hook` instead of the firing script (e.g.,
+  the `_HOOK_CALLER` drift in claude-harness — see upstream
+  pmmm114/claude-harness-engineering#99). If unset, `.hook // ""` is used
+  verbatim. In both modes the extracted value is normalized by stripping
+  a trailing `.sh`, and `routine_deny_rules` hook names are compared in
+  the same bare form — so preset rules can be written either as
+  `pre-edit-guard` or `pre-edit-guard.sh` interchangeably.
+- `repo` (optional) — last-resort fallback for target repo when env var,
+  `config.json.repo`, and CWD git-remote detection all miss. Use for
+  ephemeral CWDs (e.g., benchmark scratch dirs).
 - `routine_deny_rules.phases` supports three forms: exact literal, `prefix_*`
   (matches any phase starting with `prefix_`), and `*` (matches any phase).
   An empty array skips the rule entirely.
 - `domain_rules.match` uses shell `case` pipe-glob syntax — different dialect
   from `phases`, do not conflate.
 - The filter generator hardcodes JSONL field names (`ts`, `decision`, `hook`,
-  `phase`, `agent_id`, `event`); see §8.
+  `phase`, `agent_id`, `event`, `reason`); see §8.
 
 ### Shipped presets
 
@@ -258,6 +275,15 @@ bash report.sh --self-test
 
 Diagnoses dependency health, preset status, target repo reachability, and
 recent activity. Has zero side effects (no issues created, no files written).
+
+**Exit code (breaking change vs 3.0.x)**: since 3.1, `--self-test` exits
+non-zero (`1`) when any critical config is missing — `CLAUDE_PLUGIN_ROOT`
+unset, preset unconfigured, preset bad schema, or target repo unresolvable.
+Previously all such conditions emitted `[WARN]` and exited `0`. This makes
+the self-test usable as a CI / onboarding gate. Scripts that relied on
+`bash report.sh --self-test && echo ok` should either configure the preset
+or explicitly tolerate the exit via `|| true` where the WARN behavior is
+intended.
 
 ### Diagnostic log format
 
