@@ -62,6 +62,10 @@ expect_url "ssh://git@github.com/owner/repo.git"        "owner/repo" "ssh:// no-
 expect_url "ssh://git@github.com/owner/repo"            "owner/repo" "ssh:// no-port no-.git"
 expect_url "ssh://git@github.com:22/owner/repo.git"     "owner/repo" "ssh:// with port (PR #25 review fix)"
 expect_url "https://github.enterprise.corp/owner/repo"  "owner/repo" "GitHub Enterprise"
+expect_url "https://github.com/owner/repo.git/"         "owner/repo" ".git/ trailing slash (R3 fix)"
+expect_url "https://github.com/owner/repo/"             "owner/repo" "bare trailing slash"
+expect_url "https://GITHUB.com/owner/repo"              "owner/repo" "case-insensitive host (R3 fix)"
+expect_url "https://GitHub.COM/owner/repo"              "owner/repo" "mixed-case host"
 
 printf '\nNon-GitHub hosts (should reject):\n'
 expect_url "https://gitlab.com/owner/repo.git"          "" "gitlab"

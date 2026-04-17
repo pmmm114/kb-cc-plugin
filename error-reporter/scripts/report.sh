@@ -101,13 +101,17 @@ _resolve_repo_from_cwd() {
     return 1
   fi
 
-  # Only GitHub-family hosts are supported (gh CLI). Reject gitlab/bitbucket/etc.
+  # Case-insensitive host matching (bash 3.2 compat — use tr, not ${var,,}).
+  # GitHub owner/repo paths ARE case-sensitive, so we lowercase host only.
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
   case "$host" in
     github.com|*.github.com|github.*|*.github.*) ;;
     *) return 1 ;;
   esac
 
-  # Normalize path: strip .git suffix and trailing slashes.
+  # Normalize path: strip trailing slash FIRST, then .git suffix — order matters
+  # for URLs written as "owner/repo.git/" (slash after .git).
+  path="${path%/}"
   path="${path%.git}"
   path="${path%/}"
 
@@ -596,23 +600,25 @@ case "$EVENT" in
       # loss even after the one-shot opt_in_notice has been ack'd.
       log_line "$(printf '[%s] status=silent_skip event=%s sid=%s reason=preset_not_loaded' \
         "$TS" "$EVENT" "$SESSION")"
-      # T13: opt-in notice mechanism (one-shot per install)
+      # T13: opt-in notice mechanism (one-shot per install).
+      # Ack filename keeps the ".v3.1" suffix deliberately so upgraders from 3.1
+      # do NOT re-receive the notice on first run of 3.2 (the ack is still valid).
       NOTICE_ACK="$MARKER_DIR/.v3.1-opt-in-notice.ack"
       if [ ! -f "$NOTICE_ACK" ]; then
         NOTICE_FILE="$REPORT_DIR/error-reporter-notice-$(date +%s).md"
-        NOTICE_BODY='# error-reporter v3.1 notice
+        NOTICE_BODY='# error-reporter v3.2 notice
 
-error-reporter 3.1 handles Stop/SubagentStop reporting through an opt-in preset.
+error-reporter 3.2 handles Stop/SubagentStop reporting through an opt-in preset.
 Without a preset configured, these events are silently ignored (StopFailure reporting
-still works).
+still works, and the target repo is auto-detected from the CWD git remote since 3.2).
 
 To enable Stop/SubagentStop reporting, configure a preset:
 
     export ERROR_REPORTER_PRESET=<preset name>
-    export ERROR_REPORTER_REPO=<github owner/repo>
+    # ERROR_REPORTER_REPO is optional — CWD git remote is auto-detected
 
 Shipped presets are listed in the plugin README (section "Presets"). If you upgraded
-from v3.0 and used this plugin with claude-harness, the preset you want is
+from v3.0/3.1 and used this plugin with claude-harness, the preset you want is
 `claude-harness`.
 
 This notice fires once per install.'
@@ -759,7 +765,9 @@ $INPUT
     # returned empty. Local .md is always written (above) so observable trace is preserved.
     # Field order mirrors the status=ok/fail lines below so key=value log consumers
     # can parse uniformly (phase/agent/domain/commit present, plus the new reason/source/hook_cwd).
-    log_line "$(printf '[%s] status=fail event=%s sid=%s phase=%s agent=%s domain=%s commit=%s reason=repo_resolution_failed source=%s hook_cwd=%s local=%s' \
+    # hook_cwd is quoted because paths with spaces would otherwise break key=value
+    # tokenizers (e.g., "/Users/John Doe/proj" → "hook_cwd=/Users/John" + orphan).
+    log_line "$(printf '[%s] status=fail event=%s sid=%s phase=%s agent=%s domain=%s commit=%s reason=repo_resolution_failed source=%s hook_cwd=%q local=%s' \
       "$TS" "$EVENT" "$SESSION" "$PHASE" "${AGENT_FIELD:-none}" "$DOMAIN" "$TRIGGER_COMMIT" "${REPORT_REPO_SOURCE:-unknown}" "${HOOK_CWD:-}" "$LOCAL_OK")"
   elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     gh label create "type:incident" --description "Immediate response needed" --color "D73A4A" --repo "$REPORT_REPO" 2>/dev/null || true

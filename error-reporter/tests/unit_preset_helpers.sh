@@ -190,7 +190,9 @@ LEGACY_OUT=$(printf '%s\n' "$LEGACY_IN" | jq -c "$PRESET_DENY_FILTER_JQ" 2>/dev/
   || fail "case D1b: legacy routine deny leaked: $LEGACY_OUT"
 
 # --- D2: normalized path (_HOOK_CALLER drift defense) ---
+# shellcheck disable=SC2034  # PRESET_* globals are read by _build_deny_filter below.
 PRESET_HOOK_EXTRACTION_JSON='{"pattern":"\\[sid:[^\\]]+\\] \\[(?<h>[^\\]]+)\\]"}'
+# shellcheck disable=SC2034
 PRESET_DENY_RULES_JSON='[{"hook":"pre-edit-guard","phases":["planning"]}]'
 _build_deny_filter
 if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -q 'capture'; then
@@ -205,7 +207,9 @@ DRIFT_OUT=$(printf '%s\n' "$DRIFT_IN" | jq -c "$PRESET_DENY_FILTER_JQ" 2>/dev/nu
   || fail "case D2b: drifted entry leaked: $DRIFT_OUT"
 
 # --- D3: rule written with .sh suffix works in normalized mode too (symmetric strip) ---
+# shellcheck disable=SC2034
 PRESET_HOOK_EXTRACTION_JSON='{"pattern":"\\[sid:[^\\]]+\\] \\[(?<h>[^\\]]+)\\]"}'
+# shellcheck disable=SC2034
 PRESET_DENY_RULES_JSON='[{"hook":"pre-edit-guard.sh","phases":["planning"]}]'
 _build_deny_filter
 DRIFT_OUT2=$(printf '%s\n' "$DRIFT_IN" | jq -c "$PRESET_DENY_FILTER_JQ" 2>/dev/null)

@@ -318,11 +318,10 @@ intended.
 ```
 [<epoch>] status=ok         event=... sid=... phase=... agent=... domain=... commit=... local=...
 [<epoch>] status=fail       event=... sid=... phase=... ... exit=<N> stderr=<quoted>
-[<epoch>] status=skip       event=... sid=... reason=repo_not_configured local=...
-[<epoch>] status=opt_in_notice event=... sid=...
+[<epoch>] status=opt_in_notice   event=... sid=...
 [<epoch>] status=preset_bad_schema preset=<name> reason=<...>
 [<epoch>] status=silent_skip     event=... sid=... reason=preset_not_loaded
-[<epoch>] status=fail            event=... sid=... reason=repo_resolution_failed source=<none|...> hook_cwd=<...> local=<true|false>
+[<epoch>] status=fail            event=... sid=... phase=... agent=... domain=... commit=... reason=repo_resolution_failed source=<none|env|config|cwd:hook|preset> hook_cwd=<quoted> local=<true|false>
 ```
 
 Additional status semantics:
@@ -340,10 +339,10 @@ Additional status semantics:
 ## 8. Known limitations
 
 The filter generator hardcodes JSONL field names (`ts`, `decision`, `hook`,
-`phase`, `agent_id`, `event`). Alternative log producers must conform to this
-schema or extend the filter generator. Out of scope for v3.1. Preset
-`schema_version: 1` is a forward-compatibility hook for future schema-aware
-versions.
+`phase`, `agent_id`, `event`, `reason`). Alternative log producers must
+conform to this schema or extend the filter generator. Out of scope for
+v3.2. Preset `schema_version: 1` is a forward-compatibility hook for
+future schema-aware versions.
 
 ## 9. Coupling Surface
 
@@ -367,5 +366,5 @@ Preset files inject all of the above. The `claude-harness` preset is the
 reference implementation; third-party presets are welcomed and documented in §4.
 
 Known limitation: the filter generator hardcodes JSONL field names (`ts`,
-`decision`, `hook`, `phase`, `agent_id`, `event`). Alternative log producers
-must conform to this schema. See §8.
+`decision`, `hook`, `phase`, `agent_id`, `event`, `reason`). Alternative
+log producers must conform to this schema. See §8.
