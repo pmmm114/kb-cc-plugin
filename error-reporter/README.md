@@ -98,9 +98,11 @@ Without any configuration, `error-reporter` handles `StopFailure` events:
 2. Classifies severity — in generic mode every StopFailure lands as
    `severity:unknown` (see below).
 3. Writes a Markdown archive at `$CLAUDE_PLUGIN_DATA/reports/<sid>-<ts>-<pid>.md`.
-4. If `ERROR_REPORTER_REPO` is set, files a GitHub issue on that repo;
-   otherwise skips the `gh` call and writes a `status=skip
-   reason=repo_not_configured` breadcrumb to `error-reporter.log`.
+4. Resolves the target repo via the 3.2+ fallback chain (env
+   `ERROR_REPORTER_REPO` → `config.json.repo` → CWD git remote → `preset.repo`).
+   If resolved and `gh auth` is good, files a GitHub issue; if resolution
+   fails it writes a `status=fail reason=repo_resolution_failed` breadcrumb
+   (the local `.md` archive from step 3 still stands).
 5. `exit 0`, always.
 
 `Stop` and `SubagentStop` events are ignored in generic mode — they produce a
@@ -171,8 +173,8 @@ Field notes:
   `pre-edit-guard.sh` interchangeably). **Omitting `hook_extraction`
   preserves pre-3.2 behavior**: `.hook` field is used verbatim, rule hook
   names match with the `.sh` suffix intact, and `TRIGGER_HOOK` downstream
-  (issue titles, labels) keeps the suffixed form. Legacy presets keep
-  working unchanged.
+  (domain inference, `reporter:agent:*` label emission) keeps the suffixed
+  form. Legacy presets keep working unchanged.
   Note on JSON escape: regex `\[` is written as `\\[` in a JSON string
   (the shipped `presets/claude-harness.json` demonstrates this).
 - `repo` (optional) — last-resort fallback for target repo when env var,
@@ -262,14 +264,18 @@ with upgrade instructions. `StopFailure` reporting is unaffected.
 bash $CLAUDE_PLUGIN_ROOT/error-reporter/scripts/report.sh --self-test
 ```
 
-Expected lines (abridged):
+Expected lines (abridged, v3.2+):
 
 ```
 [ok]   preset: claude-harness (loaded)
-[ok]   target repo reachable: pmmm114/claude-harness   # or your configured repo
+[ok]   target repo: <owner>/<repo> (source=<env|config|cwd:hook|preset>, reachable)
 ```
 
-If either line differs, revisit the env exports above.
+`source=` tells you which fallback layer provided the repo. If `preset:`
+shows `[FAIL]` or `target repo:` shows `[FAIL] … not resolvable`, revisit
+the env exports / `config.json` (see §2.1 Setup). `--self-test` returns
+non-zero when any critical config is missing (v3.2 breaking change — see
+§7 Self-test).
 
 ## 7. Local archive, self-test, troubleshooting
 
