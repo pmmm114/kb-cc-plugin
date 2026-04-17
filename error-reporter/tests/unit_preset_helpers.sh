@@ -57,11 +57,12 @@ if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '"a.sh"'; then
 else
   pass "case 1a: empty-phases rule for a.sh skipped"
 fi
-# P0-1: rule hook names are normalized (.sh stripped) so $h == "b" instead of "b.sh"
-if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '"b"'; then
-  pass "case 1b: wildcard rule for b (bare) emitted"
+# P0-1 (legacy mode — no hook_extraction set): rule hook names stay verbatim.
+# Normalization only applies when PRESET_HOOK_EXTRACTION_JSON is set (see Section D).
+if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '"b.sh"'; then
+  pass "case 1b: wildcard rule for b.sh emitted (legacy path)"
 else
-  fail "case 1b: b missing from filter"
+  fail "case 1b: b.sh missing from filter"
 fi
 # Outer prelude check
 if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF 'select(.decision == "block" or .decision == "deny")'; then
@@ -73,8 +74,8 @@ fi
 # Case 2: * wildcard
 PRESET_DENY_RULES_JSON='[{"hook":"c.sh","phases":["*"]}]'
 _build_deny_filter
-if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '($h == "c")'; then
-  pass 'case 2a: wildcard emits ($h == "c") (bare after P0-1 normalization)'
+if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '($h == "c.sh")'; then
+  pass 'case 2a: wildcard emits ($h == "c.sh") (legacy path — no hook_extraction)'
 else
   fail "case 2a: wildcard emission incorrect"
 fi
@@ -94,8 +95,8 @@ if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '$p == "x"' && \
 else
   fail "case 3a: phase disjunction missing components"
 fi
-# 3-layer parens: (($h == "d") and (...)) — P0-1 normalizes hook name
-if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '(($h == "d") and ('; then
+# 3-layer parens: (($h == "d.sh") and (...)) — legacy path preserves .sh
+if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -qF '(($h == "d.sh") and ('; then
   pass "case 3b: 3-layer parenthesization present"
 else
   fail "case 3b: 3-layer parens missing — operator precedence risk"
@@ -161,6 +162,55 @@ if bash "$REPO_ROOT/error-reporter/tests/verify_preset_equivalence.sh" >/dev/nul
 else
   fail "Section C: verify_preset_equivalence.sh exit non-zero"
 fi
+
+# ============================================================================
+# Section D: hook_extraction dual-mode semantics (P0-1 defensive path)
+# ============================================================================
+# Locks the contract that:
+#   (legacy) no hook_extraction → .hook verbatim, rule clauses keep .sh
+#   (normalized) hook_extraction.pattern set → capture from .reason with
+#               .hook fallback, both sides stripped for symmetric match
+# ============================================================================
+printf '\nSection D: hook_extraction dual-mode filter semantics\n'
+
+# --- D1: legacy path (backward compat) ---
+PRESET_HOOK_EXTRACTION_JSON='null'
+PRESET_DENY_RULES_JSON='[{"hook":"pre-edit-guard.sh","phases":["planning"]}]'
+_build_deny_filter
+# Legacy: filter should NOT reference .reason capture
+if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -q 'capture'; then
+  fail "case D1a: legacy filter unexpectedly contains capture() call"
+else
+  pass "case D1a: legacy filter uses .hook directly (no capture)"
+fi
+# Legacy: .hook == "pre-edit-guard.sh" record in planning → routine (filtered out)
+LEGACY_IN='{"decision":"deny","hook":"pre-edit-guard.sh","phase":"planning","reason":""}'
+LEGACY_OUT=$(printf '%s\n' "$LEGACY_IN" | jq -c "$PRESET_DENY_FILTER_JQ" 2>/dev/null)
+[ -z "$LEGACY_OUT" ] && pass "case D1b: legacy routine deny filtered out (pre-edit-guard.sh / planning)" \
+  || fail "case D1b: legacy routine deny leaked: $LEGACY_OUT"
+
+# --- D2: normalized path (_HOOK_CALLER drift defense) ---
+PRESET_HOOK_EXTRACTION_JSON='{"pattern":"\\[sid:[^\\]]+\\] \\[(?<h>[^\\]]+)\\]"}'
+PRESET_DENY_RULES_JSON='[{"hook":"pre-edit-guard","phases":["planning"]}]'
+_build_deny_filter
+if printf '%s' "$PRESET_DENY_FILTER_JQ" | grep -q 'capture'; then
+  pass "case D2a: normalized filter uses capture() on .reason"
+else
+  fail "case D2a: normalized filter missing capture() call"
+fi
+# Normalized: record with drifted .hook (hook-lib) but real guard in .reason → filtered
+DRIFT_IN='{"decision":"deny","hook":"hook-lib","phase":"planning","reason":"[sid:abc:1:hook-lib] [pre-edit-guard] plan-before-act"}'
+DRIFT_OUT=$(printf '%s\n' "$DRIFT_IN" | jq -c "$PRESET_DENY_FILTER_JQ" 2>/dev/null)
+[ -z "$DRIFT_OUT" ] && pass "case D2b: drifted entry (.hook=hook-lib, .reason has [pre-edit-guard]) filtered out" \
+  || fail "case D2b: drifted entry leaked: $DRIFT_OUT"
+
+# --- D3: rule written with .sh suffix works in normalized mode too (symmetric strip) ---
+PRESET_HOOK_EXTRACTION_JSON='{"pattern":"\\[sid:[^\\]]+\\] \\[(?<h>[^\\]]+)\\]"}'
+PRESET_DENY_RULES_JSON='[{"hook":"pre-edit-guard.sh","phases":["planning"]}]'
+_build_deny_filter
+DRIFT_OUT2=$(printf '%s\n' "$DRIFT_IN" | jq -c "$PRESET_DENY_FILTER_JQ" 2>/dev/null)
+[ -z "$DRIFT_OUT2" ] && pass "case D3: normalized mode accepts rule 'pre-edit-guard.sh' against extracted 'pre-edit-guard'" \
+  || fail "case D3: symmetric-strip broken: $DRIFT_OUT2"
 
 # ============================================================================
 # Summary

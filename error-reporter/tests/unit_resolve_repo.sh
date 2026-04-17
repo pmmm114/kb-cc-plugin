@@ -55,8 +55,11 @@ expect_url() {
 printf 'GitHub URL variants (should resolve):\n'
 expect_url "https://github.com/owner/repo"              "owner/repo" "https no-git"
 expect_url "https://github.com/owner/repo.git"          "owner/repo" "https .git"
+expect_url "http://github.com/owner/repo.git"           "owner/repo" "http (non-TLS) accepted"
 expect_url "git@github.com:owner/repo.git"              "owner/repo" "git@ shorthand"
+expect_url "git@github.com:owner/repo"                  "owner/repo" "git@ shorthand no-.git"
 expect_url "ssh://git@github.com/owner/repo.git"        "owner/repo" "ssh:// no-port"
+expect_url "ssh://git@github.com/owner/repo"            "owner/repo" "ssh:// no-port no-.git"
 expect_url "ssh://git@github.com:22/owner/repo.git"     "owner/repo" "ssh:// with port (PR #25 review fix)"
 expect_url "https://github.enterprise.corp/owner/repo"  "owner/repo" "GitHub Enterprise"
 
@@ -64,6 +67,7 @@ printf '\nNon-GitHub hosts (should reject):\n'
 expect_url "https://gitlab.com/owner/repo.git"          "" "gitlab"
 expect_url "https://bitbucket.org/owner/repo.git"       "" "bitbucket"
 expect_url "https://git.example.com/owner/repo.git"     "" "generic self-hosted"
+expect_url "https://user:pass@github.com/owner/repo"    "" "userinfo in URL rejected (host capture includes user:pass)"
 
 printf '\nMalformed / unsupported (should reject):\n'
 expect_url "https://github.com/group/sub/repo.git"      "" "nested-path rejected"

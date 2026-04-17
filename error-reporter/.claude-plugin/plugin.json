@@ -1,9 +1,9 @@
 {
   "name": "error-reporter",
-  "version": "3.1.0",
-  "description": "Generic core that turns Claude Code hook events into GitHub issues + local archives. Stop/SubagentStop reporting is opt-in via a preset file (claude-harness reference implementation shipped); StopFailure reporting works out of the box.",
+  "version": "3.2.0",
+  "description": "Generic core that turns Claude Code hook events into GitHub issues + local archives. Stop/SubagentStop reporting is opt-in via a preset file (claude-harness reference implementation shipped); StopFailure reporting works out of the box. Since 3.2 the target GitHub repo is auto-detected from the CWD git remote when ERROR_REPORTER_REPO is unset.",
   "config": {
-    "repo": "string (optional) — GitHub repo to file issues to, e.g. 'owner/name'. Overridden by $ERROR_REPORTER_REPO. When unset, gh is skipped and only local .md archives are written.",
+    "repo": "string (optional) — GitHub repo to file issues to, e.g. 'owner/name'. Overridden by $ERROR_REPORTER_REPO. When both unset, the CWD git remote is auto-detected at runtime (3.2+).",
     "preset": "string (optional) — name of a preset under $CLAUDE_PLUGIN_ROOT/presets/<name>.json. Currently 'claude-harness' is shipped as a reference. Overridden by $ERROR_REPORTER_PRESET. When unset, Stop/SubagentStop events emit a one-shot opt-in notice and then exit silently."
   }
 }

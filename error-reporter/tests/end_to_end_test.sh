@@ -237,9 +237,13 @@ else
   fail "T6b no fallback .md"
 fi
 LOG_FILE="$TD/logs/error-reporter.log"
-[ -f "$LOG_FILE" ] && grep -q 'status=fail.*reason=repo_resolution_failed' "$LOG_FILE" \
-  && pass "T6b log has status=fail reason=repo_resolution_failed" \
-  || fail "T6b missing fail breadcrumb"
+if [ -f "$LOG_FILE" ]; then
+  N=$(grep -c 'status=fail.*reason=repo_resolution_failed' "$LOG_FILE" 2>/dev/null)
+  [ "${N:-0}" -eq 1 ] && pass "T6b log has status=fail reason=repo_resolution_failed (exactly 1)" \
+    || fail "T6b expected exactly 1 fail breadcrumb, got ${N:-0}"
+else
+  fail "T6b log missing"
+fi
 [ ! -f "$TD/gh-was-called" ] && pass "T6b gh NOT invoked (fail path)" || fail "T6b gh was called — fail path broken"
 cleanup_session "$SID" "$TD"
 
@@ -310,9 +314,13 @@ wait_for_background "$SID" "$TD/markers"
 FALLBACK_FILE=$(ls "$TD/reports/${SID}-"*".md" 2>/dev/null | head -1)
 [ -n "$FALLBACK_FILE" ] && pass "T9 fallback .md written" || fail "T9 no fallback .md"
 LOG_FILE="$TD/logs/error-reporter.log"
-[ -f "$LOG_FILE" ] && grep -q 'status=fail.*reason=repo_resolution_failed' "$LOG_FILE" \
-  && pass "T9 status=fail reason=repo_resolution_failed (exactly 1)" \
-  || fail "T9 missing fail breadcrumb"
+if [ -f "$LOG_FILE" ]; then
+  N=$(grep -c 'status=fail.*reason=repo_resolution_failed' "$LOG_FILE" 2>/dev/null)
+  [ "${N:-0}" -eq 1 ] && pass "T9 status=fail reason=repo_resolution_failed (exactly 1)" \
+    || fail "T9 expected exactly 1 fail breadcrumb, got ${N:-0}"
+else
+  fail "T9 log missing"
+fi
 [ ! -f "$TD/gh-was-called" ] && pass "T9 gh NOT invoked" || fail "T9 gh was called"
 cleanup_session "$SID" "$TD"
 

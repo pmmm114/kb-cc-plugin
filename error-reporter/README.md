@@ -67,13 +67,28 @@ EOF
 
 ```bash
 bash "$CLAUDE_PLUGIN_ROOT/error-reporter/scripts/report.sh" --self-test
-# Expected lines (on success):
+# Expected on success (excerpt — full output also prints dependencies + activity):
+#   [ok]   jq: jq-1.6
+#   [ok]   gh: gh version ...
+#   [ok]   gh auth: authenticated
 #   [ok]   preset: claude-harness (loaded)
-#   [ok]   target repo: pmmm114/<your-repo> (resolved from cwd)
+#   [ok]   target repo: <owner>/<repo> (source=cwd:hook, reachable)
 ```
 
-`--self-test` exits non-zero when preset is missing — useful for onboarding
-checks and CI integration.
+`source=<env|config|cwd:hook|preset>` tells you which resolution layer
+provided the repo (see §4 `hook_extraction` / §7 log schema for the full
+fallback chain).
+
+`--self-test` exits non-zero (`1`) when preset is missing, repo cannot be
+resolved, or `CLAUDE_PLUGIN_ROOT` is unset — useful for onboarding checks
+and CI integration.
+
+**Upgrader note (3.0.x / 3.1.x → 3.2)**: after upgrade, `error-reporter.log`
+gains a `status=silent_skip reason=preset_not_loaded` line **per Stop /
+SubagentStop event** (not just the one-shot `opt_in_notice`) until a preset
+is configured. This is intentional — it surfaces the preset-unset state to
+on-call. Configure `ERROR_REPORTER_PRESET=claude-harness` to silence the
+breadcrumb.
 
 ## 3. Generic mode
 
@@ -150,11 +165,16 @@ Field notes:
   entry's `.reason` field. Defensive against upstream loggers that record
   a library-level wrapper in `.hook` instead of the firing script (e.g.,
   the `_HOOK_CALLER` drift in claude-harness — see upstream
-  pmmm114/claude-harness-engineering#99). If unset, `.hook // ""` is used
-  verbatim. In both modes the extracted value is normalized by stripping
-  a trailing `.sh`, and `routine_deny_rules` hook names are compared in
-  the same bare form — so preset rules can be written either as
-  `pre-edit-guard` or `pre-edit-guard.sh` interchangeably.
+  pmmm114/claude-harness-engineering#99). When set, the extracted value is
+  normalized by stripping a trailing `.sh` and `routine_deny_rules` hook
+  names are compared bare (so rules can be written as `pre-edit-guard` or
+  `pre-edit-guard.sh` interchangeably). **Omitting `hook_extraction`
+  preserves pre-3.2 behavior**: `.hook` field is used verbatim, rule hook
+  names match with the `.sh` suffix intact, and `TRIGGER_HOOK` downstream
+  (issue titles, labels) keeps the suffixed form. Legacy presets keep
+  working unchanged.
+  Note on JSON escape: regex `\[` is written as `\\[` in a JSON string
+  (the shipped `presets/claude-harness.json` demonstrates this).
 - `repo` (optional) — last-resort fallback for target repo when env var,
   `config.json.repo`, and CWD git-remote detection all miss. Use for
   ephemeral CWDs (e.g., benchmark scratch dirs).
