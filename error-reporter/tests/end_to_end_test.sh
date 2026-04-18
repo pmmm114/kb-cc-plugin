@@ -443,6 +443,75 @@ RC=$?
 printf '%s\n' "$OUT" | grep -qF '[FAIL] preset: cannot check (CLAUDE_PLUGIN_ROOT unset)' && pass "T12e FAIL line" || fail "T12e FAIL line"
 rm -rf "$TD"
 
+# --- Test 13: Self-recursion guard (kb-cc-plugin#28) ---
+# When REPORT_REPO resolves to SELF_REPO (pmmm114/kb-cc-plugin), the reporter
+# must emit a breadcrumb and exit without ever invoking gh. Prevents infinite
+# incident loops when operators edit error-reporter source.
+printf '\nTest 13: self-suppress when REPORT_REPO matches SELF_REPO\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t13-$$-$(date +%s)"
+mkdir -p "$TD/markers" "$TD/bin"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"
+make_fake_gh_fatal "$TD/bin"
+INPUT=$(printf '{"hook_event_name":"StopFailure","session_id":"%s","error":"other","cwd":""}' "$SID")
+
+PATH="$TD/bin:$PATH" CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  ERROR_REPORTER_REPO=pmmm114/kb-cc-plugin \
+  bash -c "printf '%s' '$INPUT' | bash '$SCRIPT'"
+RC=$?
+[ "$RC" -eq 0 ] && pass "T13 exit 0" || fail "T13 exit $RC"
+sleep 1
+LOG_FILE="$TD/logs/error-reporter.log"
+[ -f "$LOG_FILE" ] && grep -q 'status=self_suppress' "$LOG_FILE" \
+  && pass "T13 log has status=self_suppress" \
+  || fail "T13 missing self_suppress log"
+[ ! -f "$TD/gh-was-called" ] && pass "T13 gh NOT invoked (self-suppress worked)" \
+  || fail "T13 gh was called — self-suppress failed"
+rm -rf "$TD"
+
+# --- Test 13b: non-self repo does NOT self-suppress ---
+printf '\nTest 13b: non-self repo proceeds past self-suppress guard\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t13b-$$-$(date +%s)"
+mkdir -p "$TD/markers" "$TD/bin"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"
+make_fake_gh_fatal "$TD/bin"
+INPUT=$(printf '{"hook_event_name":"StopFailure","session_id":"%s","error":"other","cwd":""}' "$SID")
+
+PATH="$TD/bin:$PATH" CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  ERROR_REPORTER_REPO=some/other-repo \
+  bash -c "printf '%s' '$INPUT' | bash '$SCRIPT'"
+RC=$?
+[ "$RC" -eq 0 ] && pass "T13b exit 0" || fail "T13b exit $RC"
+sleep 1
+LOG_FILE="$TD/logs/error-reporter.log"
+if [ -f "$LOG_FILE" ] && grep -q 'status=self_suppress' "$LOG_FILE"; then
+  fail "T13b unexpected self_suppress log (repo != self)"
+else
+  pass "T13b no self_suppress log (repo differs from self)"
+fi
+rm -rf "$TD"
+
+# --- Test 13c: ERROR_REPORTER_SELF_REPO env override (fork maintainer use case) ---
+printf '\nTest 13c: ERROR_REPORTER_SELF_REPO env override suppresses on fork\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t13c-$$-$(date +%s)"
+mkdir -p "$TD/markers" "$TD/bin"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"
+make_fake_gh_fatal "$TD/bin"
+INPUT=$(printf '{"hook_event_name":"StopFailure","session_id":"%s","error":"other","cwd":""}' "$SID")
+
+PATH="$TD/bin:$PATH" CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  ERROR_REPORTER_REPO=myfork/kb-cc-plugin \
+  ERROR_REPORTER_SELF_REPO=myfork/kb-cc-plugin \
+  bash -c "printf '%s' '$INPUT' | bash '$SCRIPT'"
+RC=$?
+[ "$RC" -eq 0 ] && pass "T13c exit 0" || fail "T13c exit $RC"
+sleep 1
+[ ! -f "$TD/gh-was-called" ] && pass "T13c gh NOT invoked (env override works)" \
+  || fail "T13c gh was called — env override broken"
+rm -rf "$TD"
+
 # --- Test 10: Malformed preset (MUST run last — manipulates CLAUDE_PLUGIN_ROOT) ---
 printf '\nTest 10: malformed preset — fail-closed (MUST run last)\n'
 (
