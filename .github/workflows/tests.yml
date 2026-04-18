@@ -25,3 +25,5 @@ jobs:
         run: bash error-reporter/tests/unit_resolve_repo.sh
       - name: verify_preset_equivalence.sh
         run: bash error-reporter/tests/verify_preset_equivalence.sh
+      - name: unit_incident_to_eval.sh
+        run: bash error-reporter/tests/unit_incident_to_eval.sh
