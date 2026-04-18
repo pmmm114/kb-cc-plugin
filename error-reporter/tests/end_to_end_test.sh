@@ -614,6 +614,57 @@ fi
 
 cleanup_session "$SID" "$TD"
 
+# --- Test 15b: reporter:repo:* flatten handles underscores in owner/repo (#33) ---
+# The previous tr+sed transform misfired when owner or repo names contained
+# underscores. This test locks in the corrected behavior across three cases.
+printf '\nTest 15b: reporter:repo:* flatten preserves internal underscores (#33)\n'
+check_repo_flat() {
+  # $1 = REPORT_REPO input, $2 = expected reporter:repo:<flat> label
+  local input="$1" expected_label="$2"
+  local td sid gh_log
+  td=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+  sid="smoke-t15b-$(date +%s%N)-$RANDOM"
+  mkdir -p "$td/markers" "$td/bin"
+  touch "$td/markers/.v3.1-opt-in-notice.ack"
+  cat > "$td/bin/gh" <<'GHFAKE'
+#!/bin/bash
+LOG="${GH_CAPTURE_LOG:-/dev/null}"
+case "$1" in
+  auth) exit 0 ;;
+  label) printf 'LABEL_CREATE: %s\n' "$3" >> "$LOG"; exit 0 ;;
+  issue) exit 0 ;;
+  *) exit 0 ;;
+esac
+GHFAKE
+  chmod +x "$td/bin/gh"
+  gh_log="$td/gh-capture.log"
+  make_synthetic_debug_log "$sid" ""
+  local payload
+  payload=$(printf '{"hook_event_name":"StopFailure","session_id":"%s","error":"other","cwd":""}' "$sid")
+
+  PATH="$td/bin:$PATH" GH_CAPTURE_LOG="$gh_log" \
+    CLAUDE_PLUGIN_DATA="$td" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+    ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO="$input" \
+    bash -c "printf '%s' '$payload' | bash '$SCRIPT'"
+
+  wait_for_background "$sid" "$td/markers"
+
+  if grep -qF "LABEL_CREATE: ${expected_label}" "$gh_log"; then
+    pass "T15b ${input} → ${expected_label}"
+  else
+    local actual
+    actual=$(grep 'LABEL_CREATE: reporter:repo:' "$gh_log" | head -1)
+    fail "T15b ${input} → expected ${expected_label}, got: ${actual}"
+  fi
+  cleanup_session "$sid" "$td"
+}
+
+# Note: avoid pmmm114/kb-cc-plugin as input — matches SELF_REPO (self-suppression)
+# and would emit no labels. Use distinct owners/repos for the flatten check.
+check_repo_flat "acme-co/simple-repo"  "reporter:repo:acme-co__simple-repo"
+check_repo_flat "user_name/repo"       "reporter:repo:user_name__repo"
+check_repo_flat "acme/my_project"      "reporter:repo:acme__my_project"
+
 # --- Test 10: Malformed preset (MUST run last — manipulates CLAUDE_PLUGIN_ROOT) ---
 printf '\nTest 10: malformed preset — fail-closed (MUST run last)\n'
 (
