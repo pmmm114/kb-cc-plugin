@@ -736,9 +736,13 @@ _five_axis_labels() {
   [ -z "$cluster_sig" ] && cluster_sig="unknown00000"
   local cluster_label="reporter:cluster:${cluster_sig}"
   # Repo label flattens owner/repo → owner__repo (GitHub labels disallow /).
+  # Uses sed with '|' delimiter to substitute '/' directly, preserving any
+  # underscores already present in the owner or repo segments. A previous
+  # two-step (tr + sed) transform mis-flattened 'user_name/repo' as
+  # 'user__name_repo' — see #33.
   local repo_flat
   if [ -n "$REPORT_REPO" ]; then
-    repo_flat=$(printf '%s' "$REPORT_REPO" | tr '/' '_' | sed 's/_/__/')
+    repo_flat=$(printf '%s' "$REPORT_REPO" | sed 's|/|__|')
     repo_label="reporter:repo:${repo_flat}"
   else
     repo_label="reporter:repo:unknown"
