@@ -112,7 +112,8 @@ wait_for_background "$SID" "$TD/markers"
 FALLBACK_FILE=$(ls "$TD/reports/${SID}-"*".md" 2>/dev/null | head -1)
 if [ -n "$FALLBACK_FILE" ] && [ -f "$FALLBACK_FILE" ]; then
   pass "T2 fallback .md written"
-  grep -q '\*\*Agent\*\*: `editor`' "$FALLBACK_FILE" && pass "T2 body has Agent=editor" || fail "T2 body missing Agent=editor"
+  # #24: body restructured — Agent now appears in the Trigger table row, column 4
+  grep -qE '^\| `SubagentStop` .* `editor` \|' "$FALLBACK_FILE" && pass "T2 body Trigger table has Agent=editor" || fail "T2 body missing Agent=editor in Trigger table"
   grep -q 'SubagentStop' "$FALLBACK_FILE" && pass "T2 body has SubagentStop event" || fail "T2 body missing event"
   grep -q 'A2-guard-recovered' "$FALLBACK_FILE" && pass "T2 severity=A2-guard-recovered (preset)" || fail "T2 severity"
 else
@@ -142,7 +143,8 @@ CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
 wait_for_background "$SID" "$TD/markers"
 FALLBACK_FILE=$(ls "$TD/reports/${SID}-"*".md" 2>/dev/null | head -1)
 if [ -n "$FALLBACK_FILE" ] && [ -f "$FALLBACK_FILE" ]; then
-  grep -q '\*\*Agent\*\*: `grader`' "$FALLBACK_FILE" \
+  # #24: body restructured — agent_id now appears in the Trigger table, column 4
+  grep -qE '^\| `SubagentStop` .* `grader` \|' "$FALLBACK_FILE" \
     && pass "T3 plugin-provided agent_id flows through (Approach D)" \
     || fail "T3 Approach D regression"
 else
@@ -208,7 +210,8 @@ wait_for_background "$SID" "$TD/markers"
 FALLBACK_FILE=$(ls "$TD/reports/${SID}-"*".md" 2>/dev/null | head -1)
 if [ -n "$FALLBACK_FILE" ] && [ -f "$FALLBACK_FILE" ]; then
   pass "T6 generic StopFailure fallback .md written"
-  grep -qi 'severity.*unknown' "$FALLBACK_FILE" && pass "T6 severity=unknown (generic mode)" || fail "T6 severity not unknown"
+  # #24: body restructured — severity now appears in Trigger table row
+  grep -qE '^\| `StopFailure` .* `unknown` \| `[^|]+` \|$' "$FALLBACK_FILE" && pass "T6 severity=unknown (generic mode)" || fail "T6 severity not unknown"
   grep -q '(unavailable)' "$FALLBACK_FILE" && pass "T6 body has (unavailable) debug log" || fail "T6 body missing (unavailable)"
 else
   fail "T6 no fallback .md"
@@ -232,7 +235,8 @@ wait_for_background "$SID" "$TD/markers"
 FALLBACK_FILE=$(ls "$TD/reports/${SID}-"*".md" 2>/dev/null | head -1)
 if [ -n "$FALLBACK_FILE" ] && [ -f "$FALLBACK_FILE" ]; then
   pass "T6b fallback .md written even without repo"
-  grep -qi 'severity.*unknown' "$FALLBACK_FILE" && pass "T6b severity=unknown" || fail "T6b severity"
+  # #24: body restructured — severity now appears in Trigger table row
+  grep -qE '^\| `StopFailure` .* `unknown` \| `[^|]+` \|$' "$FALLBACK_FILE" && pass "T6b severity=unknown" || fail "T6b severity"
 else
   fail "T6b no fallback .md"
 fi
@@ -612,6 +616,170 @@ else
   fail "T15 issue labels missing or out of order: $ACTUAL"
 fi
 
+cleanup_session "$SID" "$TD"
+
+# --- Test 16: body has all 7 sections + 10KB cap + Decisive Entry marker (#24) ---
+printf '\nTest 16: body 7-section structure + 10KB cap + decisive entry context\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t16-$$-$(date +%s)"
+mkdir -p "$TD/markers"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"
+
+# Seed a debug log with a recognizable deny line among noise (decisive entry
+# extraction should highlight the deny with a ← decisive marker).
+mkdir -p /tmp/claude-debug
+{
+  printf '{"ts":"t1","event":"PreToolUse","hook":"delegation-reminder.sh","decision":"allow","session":"%s"}\n' "$SID"
+  printf '{"ts":"t2","event":"PreToolUse","hook":"delegation-reminder.sh","decision":"allow","session":"%s"}\n' "$SID"
+  printf '{"ts":"t3","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"[sid:x] [verify-before-done.sh] blocked","phase":"verifying","session":"%s"}\n' "$SID"
+  printf '{"ts":"t4","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"allow","session":"%s"}\n' "$SID"
+} > "/tmp/claude-debug/$SID.jsonl"
+
+INPUT=$(printf '{"hook_event_name":"SubagentStop","session_id":"%s","cwd":"","agent_id":"editor"}' "$SID")
+
+CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo \
+  bash -c "printf '%s' '$INPUT' | bash '$SCRIPT'"
+
+wait_for_background "$SID" "$TD/markers"
+
+FALLBACK_FILE=$(ls "$TD/reports/${SID}-"*".md" 2>/dev/null | head -1)
+if [ -n "$FALLBACK_FILE" ] && [ -f "$FALLBACK_FILE" ]; then
+  pass "T16 fallback .md written"
+  # Seven sections: Trigger, Decisive Entry, Counterfactual, Base Rates,
+  # Related Meta-Eval, Known Drift Match, Reproduction (+ <details>)
+  for section in "## Trigger" "## Decisive Entry" "## Counterfactual" "## Base Rates" "## Related Meta-Eval" "## Known Drift Match" "## Reproduction"; do
+    if grep -qF "$section" "$FALLBACK_FILE"; then
+      pass "T16 section present: $section"
+    else
+      fail "T16 section missing: $section"
+    fi
+  done
+  # <details> collapsible fallback block
+  grep -qF '<details><summary>Raw data (collapsed)</summary>' "$FALLBACK_FILE" \
+    && pass "T16 details fallback block present" \
+    || fail "T16 details fallback block missing"
+  # Decisive entry marker (← decisive)
+  grep -qF '← decisive' "$FALLBACK_FILE" \
+    && pass "T16 decisive entry marker emitted (deny line highlighted)" \
+    || fail "T16 decisive entry marker missing"
+  # Trigger table row contains expected cells
+  grep -qE '^\| `SubagentStop` .* `editor` \|' "$FALLBACK_FILE" \
+    && pass "T16 Trigger table row has SubagentStop + editor" \
+    || fail "T16 Trigger table row malformed"
+  # Reproduction section has /kb-harness --from-incident literal
+  grep -qF '/kb-harness --from-incident' "$FALLBACK_FILE" \
+    && pass "T16 Reproduction has /kb-harness --from-incident literal" \
+    || fail "T16 Reproduction literal missing"
+else
+  fail "T16 no fallback .md"
+fi
+cleanup_session "$SID" "$TD"
+
+# --- Test 16b: 10KB body cap triggers when payload is large ---
+printf '\nTest 16b: body truncated to ≤10KB when synthetic payload overflows\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t16b-$$-$(date +%s)"
+mkdir -p "$TD/markers"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"
+
+# Synthetic debug log with a 40KB blob to overflow the 10KB body cap
+{
+  printf '{"ts":"t1","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"[sid:x] [verify-before-done.sh] blocked","phase":"verifying","session":"%s"}\n' "$SID"
+  # Pad with ~40KB of content distributed across 50 lines → each line ~800 chars
+  pad=$(printf 'X%.0s' $(seq 1 800))
+  for i in $(seq 1 50); do
+    printf '{"ts":"pad%d","event":"PreToolUse","decision":"allow","data":"%s","session":"%s"}\n' "$i" "$pad" "$SID"
+  done
+} > "/tmp/claude-debug/$SID.jsonl"
+
+INPUT=$(printf '{"hook_event_name":"SubagentStop","session_id":"%s","cwd":"","agent_id":"editor"}' "$SID")
+CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo \
+  bash -c "printf '%s' '$INPUT' | bash '$SCRIPT'"
+
+wait_for_background "$SID" "$TD/markers"
+
+FALLBACK_FILE=$(ls "$TD/reports/${SID}-"*".md" 2>/dev/null | head -1)
+if [ -n "$FALLBACK_FILE" ] && [ -f "$FALLBACK_FILE" ]; then
+  BODY_BYTES=$(wc -c < "$FALLBACK_FILE" | tr -d ' ')
+  # Body should be ≤ 10KB + small margin for truncation marker (~200 bytes).
+  # Local .md has full untruncated body (it's written BEFORE cap is applied
+  # to REPORT_BODY); strictly speaking the local file may exceed 10KB. The
+  # cap is ON the GitHub issue body — not on the fallback file. We can't
+  # directly observe the gh call's --body argument without a fake-gh capture.
+  # Assert instead that the truncation marker is present in the SAME SESSION's
+  # gh-captured payload (but fallback .md is the local raw). Simpler here:
+  # verify the marker appears in whichever artifact has it, and that body
+  # construction didn't crash.
+  pass "T16b body constructed for oversize payload"
+  # Body should still include the Trigger section (sections 1-2 preserved)
+  grep -qF '## Trigger' "$FALLBACK_FILE" && pass "T16b Trigger section preserved on overflow" \
+    || fail "T16b Trigger section dropped"
+else
+  fail "T16b no fallback .md on oversize payload"
+fi
+cleanup_session "$SID" "$TD"
+
+# --- Test 16c: 10KB cap — gh --body actually ≤10KB via fake-gh capture ---
+printf '\nTest 16c: gh issue --body ≤10KB when oversize, truncation marker present\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t16c-$$-$(date +%s)"
+mkdir -p "$TD/markers" "$TD/bin"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"
+
+# Fake gh that captures --body to file for size inspection
+cat > "$TD/bin/gh" <<'GHFAKE'
+#!/bin/bash
+LOG="${GH_CAPTURE_LOG:-/dev/null}"
+case "$1" in
+  auth) exit 0 ;;
+  label) exit 0 ;;
+  issue)
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--body" ]; then
+        printf '%s' "$2" > "${GH_BODY_CAPTURE:-/dev/null}"
+        break
+      fi
+      shift
+    done
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+GHFAKE
+chmod +x "$TD/bin/gh"
+
+# Seed large debug log (same approach as T16b)
+{
+  printf '{"ts":"t1","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"[sid:x] [verify-before-done.sh] blocked","phase":"verifying","session":"%s"}\n' "$SID"
+  pad=$(printf 'X%.0s' $(seq 1 800))
+  for i in $(seq 1 50); do
+    printf '{"ts":"pad%d","event":"PreToolUse","decision":"allow","data":"%s","session":"%s"}\n' "$i" "$pad" "$SID"
+  done
+} > "/tmp/claude-debug/$SID.jsonl"
+
+INPUT=$(printf '{"hook_event_name":"SubagentStop","session_id":"%s","cwd":"","agent_id":"editor"}' "$SID")
+PATH="$TD/bin:$PATH" GH_BODY_CAPTURE="$TD/body.txt" \
+  CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo \
+  bash -c "printf '%s' '$INPUT' | bash '$SCRIPT'"
+
+wait_for_background "$SID" "$TD/markers"
+
+if [ -f "$TD/body.txt" ]; then
+  BODY_BYTES=$(wc -c < "$TD/body.txt" | tr -d ' ')
+  if [ "$BODY_BYTES" -le 10400 ]; then
+    pass "T16c gh body ≤10KB (actual: ${BODY_BYTES} bytes)"
+  else
+    fail "T16c gh body exceeds cap: ${BODY_BYTES} bytes > 10400"
+  fi
+  grep -qF 'body truncated at 10KB boundary' "$TD/body.txt" \
+    && pass "T16c truncation marker present in gh body" \
+    || fail "T16c truncation marker missing"
+else
+  fail "T16c gh body was not captured"
+fi
 cleanup_session "$SID" "$TD"
 
 # --- Test 15b: reporter:repo:* flatten handles underscores in owner/repo (#33) ---

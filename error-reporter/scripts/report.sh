@@ -774,22 +774,90 @@ AGENT_FIELD="$AGENT_ID"
 
   TITLE="[incident] $EVENT${AGENT_ID:+($AGENT_ID)} (${SESSION:0:8})"
 
-  REPORT_BODY="## Observation
+  # #24: extract the decisive entry — the first deny/fail line from the
+  # last 50 lines of the debug log — with ±5 lines of context for signal
+  # concentration. Falls back to the full tail when no match is found.
+  DECISIVE_CONTEXT="(no decisive entry detected in last 50 lines)"
+  if [ -n "$DEBUG_LOG_TAIL" ]; then
+    DECISIVE_CONTEXT=$(printf '%s\n' "$DEBUG_LOG_TAIL" \
+      | awk '
+          /"decision":"(deny|block)"|"status":"fail"/ {
+            found = NR
+            for (i = NR - 5; i <= NR + 5; i++) ctx[i] = 1
+          }
+          {
+            lines[NR] = $0
+          }
+          END {
+            if (found) {
+              for (i = 1; i <= NR; i++) if (ctx[i]) {
+                marker = (i == found) ? "  ← decisive" : ""
+                printf "%s%s\n", lines[i], marker
+              }
+            } else {
+              for (i = 1; i <= NR; i++) print lines[i]
+            }
+          }
+        ' 2>/dev/null)
+    [ -z "$DECISIVE_CONTEXT" ] && DECISIVE_CONTEXT="$DEBUG_LOG_TAIL"
+  fi
 
-**Event**: \`$EVENT\`${AGENT_ID:+ | **Agent**: \`$AGENT_ID\`}
-**Session ID**: \`${SESSION:0:8}\`
-**Phase**: \`$PHASE\`
-**Trigger Commit**: \`$TRIGGER_COMMIT\`
-**Severity**: \`$SEVERITY\`
-**Reproducibility**: observed once
+  REPORT_BODY="## Trigger
 
-${EVENT} event fired during phase \`$PHASE\`.${AGENT_FIELD:+ Agent \`$AGENT_FIELD\` was active.}
+| Event | Hook | Phase | Agent | Severity | Commit |
+|-------|------|-------|-------|----------|--------|
+| \`$EVENT\` | \`${TRIGGER_HOOK:-—}\` | \`$PHASE\` | \`${AGENT_ID:-—}\` | \`$SEVERITY\` | \`$TRIGGER_COMMIT\` |
+
+## Decisive Entry
+
+\`\`\`jsonl
+${DECISIVE_CONTEXT}
+\`\`\`
 
 ## Counterfactual
 
 <!-- What SHOULD have happened — fill in manually to make this observation actionable -->
 
-## Evidence
+## Base Rates
+
+<!-- TODO #24 follow-up: deny/total ratio for \`${TRIGGER_HOOK:-unknown}\`
+     + recent 5 commits on touched component. Requires harness repo access. -->
+
+## Related Meta-Eval
+
+<!-- TODO #24 follow-up: pointer to \`benchmarks/meta-evals/${TRIGGER_HOOK%.*}.json\`
+     or \`coverage-gap\` badge. Requires harness \`benchmarks/meta-evals/\` enumeration. -->
+
+## Known Drift Match
+
+<!-- TODO #24 follow-up: auto-grep \$CLAUDE_CONFIG_DIR/CLAUDE.md
+     §\"Known drift & risks\" for \`${TRIGGER_HOOK:-unknown}\` references. -->
+
+## Reproduction
+
+Re-run the incident context via the harness skill:
+
+\`\`\`bash
+/kb-harness --from-incident <this-issue-number> --target \$HOME/.claude-harness
+\`\`\`
+
+Related eval (fill in the eval id when one applies):
+
+\`\`\`bash
+/eval <eval-id>
+\`\`\`
+
+<details><summary>Raw data (collapsed)</summary>
+
+### Hook Input
+\`\`\`json
+$INPUT
+\`\`\`
+
+### State Snapshot
+\`\`\`json
+${STATE_SNAPSHOT:-(unavailable)}
+\`\`\`
 
 ### Debug Log (last 50 lines)
 \`\`\`
@@ -801,19 +869,24 @@ ${DEBUG_LOG_TAIL:-(unavailable)}
 ${TRANSCRIPT_TAIL:-(unavailable)}
 \`\`\`
 
-### State Snapshot
-\`\`\`json
-${STATE_SNAPSHOT:-(unavailable)}
-\`\`\`
+</details>"
 
-### Hook Input
-\`\`\`json
-$INPUT
-\`\`\`
+  # #24: 10KB body cap. GitHub issue bodies accept up to 65536 chars, but
+  # dashboards + reviewers suffer above ~10KB. Truncate tail (the <details>
+  # collapsed block is the longest section and the least decision-dense).
+  # Full payload preserved in the local .md fallback (written below).
+  BODY_MAX_BYTES=10240
+  BODY_BYTES=$(printf '%s' "$REPORT_BODY" | wc -c | tr -d ' ')
+  if [ "${BODY_BYTES:-0}" -gt "$BODY_MAX_BYTES" ]; then
+    # Reserve 160 bytes for the truncation marker, cut the rest via head -c
+    # (byte-safe for multi-byte chars — unlike \${VAR:0:N} which is char-based).
+    REPORT_BODY=$(printf '%s' "$REPORT_BODY" | head -c $((BODY_MAX_BYTES - 160)))
+    REPORT_BODY="$REPORT_BODY
 
-## Hypothesis
+---
 
-<!-- Suspected root cause — fill in manually -->"
+<!-- #24: body truncated at 10KB boundary. Full payload in local report.md. -->"
+  fi
 
   # Always-local archive (write before gh attempt)
   FALLBACK_FILE="$REPORT_DIR/${SESSION}-$(date +%s)-$$.md"
