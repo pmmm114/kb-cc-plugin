@@ -222,14 +222,25 @@ check_severity "StopFailure" "generic failure" "default"
 check_severity "Stop" "" "Stop"
 check_severity "SubagentStop" "" "SubagentStop"
 
-# --- 5. Domain rules sanity (every preset domain rule pattern must match
-# at least one current-code case arm pattern) ---
-# Soft check: just verify domain_rules is parseable and non-empty.
-DOMAIN_RULE_COUNT=$(jq '.domain_rules | length' "$PRESET")
-if [ "$DOMAIN_RULE_COUNT" -ge 4 ]; then
-  pass "domain_rules has $DOMAIN_RULE_COUNT entries (≥4 expected)"
+# --- 5. Schema v2 invariants (#22) ---
+# v=2 presets MUST drop the domain_rules and default_domain fields (removed
+# in favor of 5-axis emission). v=1 presets keep them for backcompat.
+PRESET_V=$(jq -r '.schema_version // empty' "$PRESET")
+if [ "$PRESET_V" = "2" ]; then
+  pass "preset schema_version = 2"
+  HAS_DOMAIN_RULES=$(jq 'has("domain_rules")' "$PRESET")
+  [ "$HAS_DOMAIN_RULES" = "false" ] && pass "v=2 preset drops domain_rules field" \
+    || fail "v=2 preset still has domain_rules — should be removed"
+  HAS_DEFAULT_DOMAIN=$(jq 'has("default_domain")' "$PRESET")
+  [ "$HAS_DEFAULT_DOMAIN" = "false" ] && pass "v=2 preset drops default_domain field" \
+    || fail "v=2 preset still has default_domain — should be removed"
+elif [ "$PRESET_V" = "1" ]; then
+  pass "preset schema_version = 1 (legacy; domain_rules expected)"
+  DOMAIN_RULE_COUNT=$(jq '.domain_rules | length' "$PRESET")
+  [ "$DOMAIN_RULE_COUNT" -ge 4 ] && pass "v=1 preset has ≥4 domain_rules ($DOMAIN_RULE_COUNT)" \
+    || fail "v=1 preset has only $DOMAIN_RULE_COUNT domain_rules"
 else
-  fail "domain_rules has only $DOMAIN_RULE_COUNT entries"
+  fail "preset has unsupported schema_version: ${PRESET_V:-<missing>}"
 fi
 
 printf '\nSummary: %d passed, %d failed\n' "$PASS" "$FAIL"

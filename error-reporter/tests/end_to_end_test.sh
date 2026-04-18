@@ -550,6 +550,70 @@ sleep 1
   || fail "T13c gh was called — env override broken"
 rm -rf "$TD"
 
+# --- Test 15: v=2 preset emits 5-axis labels, no legacy reporter:domain:* (#22) ---
+printf '\nTest 15: v=2 preset emits 5-axis labels, no legacy reporter:domain:*\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t15-$$-$(date +%s)"
+mkdir -p "$TD/markers" "$TD/bin"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"
+
+# Fake gh that captures --label arguments to a log file
+cat > "$TD/bin/gh" <<'GHFAKE'
+#!/bin/bash
+LOG="${GH_CAPTURE_LOG:-/dev/null}"
+case "$1" in
+  auth) exit 0 ;;
+  label) printf 'LABEL_CREATE: %s\n' "$3" >> "$LOG"; exit 0 ;;
+  issue)
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--label" ]; then
+        printf 'ISSUE_LABELS: %s\n' "$2" >> "$LOG"
+        break
+      fi
+      shift
+    done
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+GHFAKE
+chmod +x "$TD/bin/gh"
+
+GH_CAPTURE="$TD/gh-capture.log"
+make_synthetic_debug_log "$SID" ""
+INPUT=$(printf '{"hook_event_name":"StopFailure","session_id":"%s","error":"other","cwd":""}' "$SID")
+
+PATH="$TD/bin:$PATH" GH_CAPTURE_LOG="$GH_CAPTURE" \
+  CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo \
+  bash -c "printf '%s' '$INPUT' | bash '$SCRIPT'"
+
+wait_for_background "$SID" "$TD/markers"
+
+# Assert: 5-axis labels requested
+grep -q 'LABEL_CREATE: reporter:hook:' "$GH_CAPTURE" && pass "T15 reporter:hook: label emitted" || fail "T15 reporter:hook: missing"
+grep -q 'LABEL_CREATE: reporter:phase:' "$GH_CAPTURE" && pass "T15 reporter:phase: label emitted" || fail "T15 reporter:phase: missing"
+grep -q 'LABEL_CREATE: reporter:severity:' "$GH_CAPTURE" && pass "T15 reporter:severity: label emitted" || fail "T15 reporter:severity: missing"
+grep -q 'LABEL_CREATE: reporter:cluster:' "$GH_CAPTURE" && pass "T15 reporter:cluster: label emitted" || fail "T15 reporter:cluster: missing"
+grep -q 'LABEL_CREATE: reporter:repo:' "$GH_CAPTURE" && pass "T15 reporter:repo: label emitted" || fail "T15 reporter:repo: missing"
+
+# Assert: no legacy reporter:domain:* (v=2 preset has no domain_rules)
+if grep -q 'LABEL_CREATE: reporter:domain:' "$GH_CAPTURE"; then
+  fail "T15 v=2 preset unexpectedly emitted reporter:domain:*"
+else
+  pass "T15 v=2 preset does NOT emit legacy reporter:domain:*"
+fi
+
+# Assert: ISSUE_LABELS CSV includes all 5 axes
+if grep -q 'ISSUE_LABELS:.*reporter:hook:.*reporter:phase:.*reporter:severity:.*reporter:cluster:.*reporter:repo:' "$GH_CAPTURE"; then
+  pass "T15 issue labels include all 5 axes in order"
+else
+  ACTUAL=$(grep 'ISSUE_LABELS:' "$GH_CAPTURE" | head -1)
+  fail "T15 issue labels missing or out of order: $ACTUAL"
+fi
+
+cleanup_session "$SID" "$TD"
+
 # --- Test 10: Malformed preset (MUST run last — manipulates CLAUDE_PLUGIN_ROOT) ---
 printf '\nTest 10: malformed preset — fail-closed (MUST run last)\n'
 (
@@ -558,7 +622,9 @@ printf '\nTest 10: malformed preset — fail-closed (MUST run last)\n'
   TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
   mkdir -p "$TMP_ROOT/presets" "$TD/markers"
   touch "$TD/markers/.v3.1-opt-in-notice.ack"
-  printf '{"schema_version":2}' > "$TMP_ROOT/presets/broken.json"
+  # #22: schema_version:2 is now LEGAL (v=2 presets). Bump malformed fixture
+  # to 99 to preserve the "unsupported schema" failure path.
+  printf '{"schema_version":99}' > "$TMP_ROOT/presets/broken.json"
   INPUT=$(printf '{"hook_event_name":"Stop","session_id":"%s","transcript_path":""}' "$SID")
 
   CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$TMP_ROOT" \
