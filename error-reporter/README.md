@@ -132,11 +132,11 @@ export ERROR_REPORTER_PRESET=<preset name>   # env var takes precedence
 Without activation the plugin stays in generic mode regardless of which preset
 files exist on disk.
 
-### Schema (v1)
+### Schema (v2, current)
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "<preset-name>",
   "debug_log_path": "/some/path/{session_id}.jsonl",
   "state_file_path": "/some/path/{session_id}.json",
@@ -147,10 +147,6 @@ files exist on disk.
   "routine_deny_rules": [
     { "hook": "<filename.sh>", "phases": ["<literal>", "<prefix>_*", "*"] }
   ],
-  "domain_rules": [
-    { "match": "*pattern*|*alt*", "domain": "reporter:domain:<name>" }
-  ],
-  "default_domain": "reporter:domain:hook",
   "severity_rules": {
     "StopFailure": { "timeout": "<label>", "default": "<label>" },
     "Stop": "<label>",
@@ -158,6 +154,14 @@ files exist on disk.
   }
 }
 ```
+
+### Schema v1 (legacy — still accepted for backcompat)
+
+Presets with `schema_version: 1` additionally carry `domain_rules` and
+`default_domain` fields. When loaded, the reporter continues to emit the
+legacy `reporter:domain:*` label alongside the new 5-axis labels. Drop
+these fields and bump `schema_version` to `2` to opt into the new labeling.
+See #18 / #22 for rationale.
 
 Field notes:
 
@@ -184,10 +188,27 @@ Field notes:
 - `routine_deny_rules.phases` supports three forms: exact literal, `prefix_*`
   (matches any phase starting with `prefix_`), and `*` (matches any phase).
   An empty array skips the rule entirely.
-- `domain_rules.match` uses shell `case` pipe-glob syntax — different dialect
-  from `phases`, do not conflate.
+- `domain_rules` and `default_domain` are **v=1 only** (legacy). v=2 presets
+  drop these fields; labeling uses the 5-axis scheme below instead.
 - The filter generator hardcodes JSONL field names (`ts`, `decision`, `hook`,
   `phase`, `agent_id`, `event`, `reason`); see §8.
+
+### Labels emitted per incident (#22 — 5-axis)
+
+Every auto-filed issue carries:
+
+| Label                              | Value source                                          |
+|------------------------------------|-------------------------------------------------------|
+| `type:incident`                    | static                                                |
+| `auto:hook-failure`                | static                                                |
+| `severity:<A1..A3>`                | `severity_rules` lookup (event/sf_error)              |
+| `reporter:hook:<name>`             | `TRIGGER_HOOK` from preset filter                     |
+| `reporter:phase:<name>`            | `.phase` from state snapshot                          |
+| `reporter:severity:<A1..A3>`       | mirror of `severity:*` with reporter-prefix namespace |
+| `reporter:cluster:<12-char-sha1>`  | sha1 of `hook:phase:severity:agent` → first 12 chars  |
+| `reporter:repo:<owner>__<repo>`    | `REPORT_REPO` with `/` → `__` (GitHub label rule)     |
+| `reporter:agent:<id>`              | when `agent_id` is set                                |
+| `reporter:domain:<name>`           | v=1 preset only (legacy; absent for v=2)              |
 
 ### Shipped presets
 
@@ -197,9 +218,10 @@ Field notes:
 
 ## 5. Preset: claude-harness
 
-This preset makes `error-reporter` behave like the pre-3.1 code — it mirrors
-the hardcoded `EXPECTED_DENY_FILTER`, `infer_domain`, and severity case arms
-from v3.0 byte-for-byte. It assumes the JSONL debug log emitted by
+This preset mirrors the hardcoded `EXPECTED_DENY_FILTER` and severity case
+arms. As of schema v2 (#22), it no longer carries `domain_rules` /
+`default_domain` — the 5-axis label scheme supersedes the single domain axis.
+It assumes the JSONL debug log emitted by
 [claude-harness](https://github.com/pmmm114/claude-harness)'s
 `hook-lib-core.sh`.
 
@@ -213,15 +235,13 @@ from v3.0 byte-for-byte. It assumes the JSONL debug log emitted by
 | `worktree-guard.sh`            | idle, config_* (first-edit redirect)                                           |
 | `guardian-worktree-guard.sh`   | all (worktree entry enforcement)                                               |
 
-### Domain inference
+### Domain inference (legacy, v=1 presets only — removed in v=2)
 
-| Hook name matches                                                 | Assigned domain           |
-|-------------------------------------------------------------------|---------------------------|
-| `*config-worktree*`, `*config-agent*`, `*config-guardian*`        | `reporter:domain:hook`    |
-| `*pre-edit*`, `*verify-before*`, `*pr-template*`, `*pr-review*`   | `reporter:domain:hook`    |
-| `*delegation*`, `*subagent-validate*`, `*tdd-dispatch*`           | `reporter:domain:hook`    |
-| `*session-recovery*`, `*state-recovery*`, `*compact*`, `*preflight*` | `reporter:domain:infra` |
-| (no match)                                                        | `reporter:domain:hook`    |
+Prior to #22 the `claude-harness` preset shipped `domain_rules` that mapped
+hook names to one of `reporter:domain:{hook,infra,agent}`. Post-#22 these
+fields are removed; the 5-axis scheme above replaces the single domain axis.
+Fork maintainers with v=1 presets still see legacy `reporter:domain:*`
+emission alongside the 5-axis labels during the backcompat window.
 
 ### Severity
 

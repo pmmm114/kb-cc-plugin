@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "claude-harness",
   "debug_log_path": "/tmp/claude-debug/{session_id}.jsonl",
   "state_file_path": "/tmp/claude-session/{session_id}.json",
@@ -35,25 +35,6 @@
       "phases": ["*"]
     }
   ],
-  "domain_rules": [
-    {
-      "match": "*config-worktree*|*config-agent*|*config-guardian*",
-      "domain": "reporter:domain:hook"
-    },
-    {
-      "match": "*pre-edit*|*verify-before*|*pr-template*|*pr-review*",
-      "domain": "reporter:domain:hook"
-    },
-    {
-      "match": "*delegation*|*subagent-validate*|*tdd-dispatch*",
-      "domain": "reporter:domain:hook"
-    },
-    {
-      "match": "*session-recovery*|*state-recovery*|*compact*|*preflight*",
-      "domain": "reporter:domain:infra"
-    }
-  ],
-  "default_domain": "reporter:domain:hook",
   "severity_rules": {
     "StopFailure": {
       "timeout": "A3-resource",
