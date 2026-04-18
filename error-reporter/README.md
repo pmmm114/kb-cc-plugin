@@ -84,11 +84,12 @@ resolved, or `CLAUDE_PLUGIN_ROOT` is unset — useful for onboarding checks
 and CI integration.
 
 **Upgrader note (3.0.x / 3.1.x → 3.2)**: after upgrade, `error-reporter.log`
-gains a `status=silent_skip reason=preset_not_loaded` line **per Stop /
-SubagentStop event** (not just the one-shot `opt_in_notice`) until a preset
-is configured. This is intentional — it surfaces the preset-unset state to
-on-call. Configure `ERROR_REPORTER_PRESET=claude-harness` to silence the
-breadcrumb.
+gains a `status=silent_skip reason=preset_not_loaded` line **at most once
+per session per hour** while a preset is unconfigured. Rate-limiting (#26)
+ensures Stop-heavy sessions cannot flood the 1000-line ring buffer.
+The `opt_in_notice` one-shot is unchanged and still fires only on the first
+event per install. Configure `ERROR_REPORTER_PRESET=claude-harness` to
+silence both breadcrumbs.
 
 ## 3. Generic mode
 
@@ -326,10 +327,12 @@ intended.
 
 Additional status semantics:
 
-- `silent_skip` — emitted **per event** when `ERROR_REPORTER_PRESET` is unset.
-  Surfaces repeated silent skips to on-call without blocking the hook chain.
-  Coexists with the one-shot `opt_in_notice` (which fires only on the first
-  event until the ack file is deleted).
+- `silent_skip` — emitted **at most once per session per hour** when
+  `ERROR_REPORTER_PRESET` is unset. Hour-bucketed rate limit (#26) via
+  `$MARKER_DIR/.silent_skip.<sid>.<YYYYMMDDHH>` markers prevents log flooding
+  on Stop-heavy sessions. Markers share the 7-day TTL sweep with `*.reported`
+  and `*.lock`. Coexists with the one-shot `opt_in_notice` (which fires only
+  on the first event until the ack file is deleted).
 - `repo_resolution_failed` — appears on `status=fail` rows when all four
   fallbacks (env `ERROR_REPORTER_REPO`, `config.json.repo`, hook-input `.cwd` →
   git remote, preset `.repo` field) yielded an empty result. Logged as

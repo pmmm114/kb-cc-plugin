@@ -443,6 +443,44 @@ RC=$?
 printf '%s\n' "$OUT" | grep -qF '[FAIL] preset: cannot check (CLAUDE_PLUGIN_ROOT unset)' && pass "T12e FAIL line" || fail "T12e FAIL line"
 rm -rf "$TD"
 
+# --- Test 14: silent_skip rate-limit (#26) ---
+# silent_skip must emit at most once per session per hour. Previously every
+# Stop/SubagentStop event appended a line, which could flood the 1000-line
+# ring buffer on Stop-heavy sessions.
+printf '\nTest 14: silent_skip rate-limited to 1 emit per session per hour\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t14-$$-$(date +%s)"
+mkdir -p "$TD/markers"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"  # suppress notice noise
+INPUT=$(printf '{"hook_event_name":"Stop","session_id":"%s","transcript_path":""}' "$SID")
+
+# Fire 5 events in rapid succession — all within the same UTC hour
+for _ in 1 2 3 4 5; do
+  CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+    bash -c "unset ERROR_REPORTER_PRESET ERROR_REPORTER_REPO; printf '%s' '$INPUT' | bash '$SCRIPT'"
+done
+
+sleep 1
+LOG_FILE="$TD/logs/error-reporter.log"
+SKIP_COUNT=$(grep -c 'status=silent_skip' "$LOG_FILE" 2>/dev/null || echo 0)
+[ "$SKIP_COUNT" = "1" ] && pass "T14 5 events → 1 silent_skip log line (rate-limited)" \
+  || fail "T14 expected 1 silent_skip, got $SKIP_COUNT"
+
+HOUR=$(date -u +%Y%m%d%H)
+MARKER="$TD/markers/.silent_skip.${SID}.${HOUR}"
+[ -f "$MARKER" ] && pass "T14 hour-bucketed marker created at expected path" \
+  || fail "T14 marker missing: $MARKER"
+
+# Simulate hour rollover by deleting the marker — next event should emit
+rm -f "$MARKER"
+CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  bash -c "unset ERROR_REPORTER_PRESET ERROR_REPORTER_REPO; printf '%s' '$INPUT' | bash '$SCRIPT'"
+sleep 1
+SKIP_COUNT_2=$(grep -c 'status=silent_skip' "$LOG_FILE" 2>/dev/null || echo 0)
+[ "$SKIP_COUNT_2" = "2" ] && pass "T14 hour rollover → 2nd silent_skip emitted" \
+  || fail "T14 expected 2 silent_skip after rollover, got $SKIP_COUNT_2"
+rm -rf "$TD"
+
 # --- Test 13: Self-recursion guard (kb-cc-plugin#28) ---
 # When REPORT_REPO resolves to SELF_REPO (pmmm114/kb-cc-plugin), the reporter
 # must emit a breadcrumb and exit without ever invoking gh. Prevents infinite

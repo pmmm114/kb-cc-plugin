@@ -607,10 +607,17 @@ case "$EVENT" in
     ;;
   Stop|SubagentStop)
     if [ "$PRESET_LOADED" != true ]; then
-      # P0-3: per-event silent_skip breadcrumb so operators can detect silent
-      # loss even after the one-shot opt_in_notice has been ack'd.
-      log_line "$(printf '[%s] status=silent_skip event=%s sid=%s reason=preset_not_loaded' \
-        "$TS" "$EVENT" "$SESSION")"
+      # P0-3 + #26: session/hour-bucketed silent_skip breadcrumb. Emits at
+      # most one line per session per hour so Stop-heavy sessions cannot
+      # flood the 1000-line log ring buffer and displace real status=ok/fail
+      # breadcrumbs. Markers live under $MARKER_DIR/.silent_skip.<sid>.<YYYYMMDDHH>
+      # and are swept by the 7-day TTL find below.
+      SKIP_MARKER="$MARKER_DIR/.silent_skip.${SESSION}.$(date -u +%Y%m%d%H)"
+      if [ ! -f "$SKIP_MARKER" ]; then
+        log_line "$(printf '[%s] status=silent_skip event=%s sid=%s reason=preset_not_loaded' \
+          "$TS" "$EVENT" "$SESSION")"
+        touch "$SKIP_MARKER" 2>/dev/null
+      fi
       # T13: opt-in notice mechanism (one-shot per install).
       # Ack filename keeps the ".v3.1" suffix deliberately so upgraders from 3.1
       # do NOT re-receive the notice on first run of 3.2 (the ack is still valid).
@@ -715,8 +722,9 @@ AGENT_FIELD="$AGENT_ID"
   fi
   trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
-  # Opportunistic sweep of leftovers (7-day TTL).
-  find "$MARKER_DIR" "$LOCK_ROOT" -maxdepth 1 \( -name '*.lock' -o -name '*.reported' \) -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+  # Opportunistic sweep of leftovers (7-day TTL). Includes silent_skip
+  # hour-bucketed markers (#26) alongside lock dirs and reported markers.
+  find "$MARKER_DIR" "$LOCK_ROOT" -maxdepth 1 \( -name '*.lock' -o -name '*.reported' -o -name '.silent_skip.*' \) -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 
   TITLE="[incident] $EVENT${AGENT_ID:+($AGENT_ID)} (${SESSION:0:8})"
 
