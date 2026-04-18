@@ -1,14 +1,13 @@
 name: tests
 
+# PR-gating workflow. Runs on every push/pull-request per RULESET-POLICY.md —
+# `paths:` filters are intentionally omitted so every PR produces the
+# `error-reporter end-to-end smoke` check required by the branch ruleset.
+# The tests are fast (<45s) so the cost of repo-wide execution is acceptable.
+
 on:
   push:
-    paths:
-      - 'error-reporter/**'
-      - '.github/workflows/tests.yml'
   pull_request:
-    paths:
-      - 'error-reporter/**'
-      - '.github/workflows/tests.yml'
 
 jobs:
   error-reporter-smoke:

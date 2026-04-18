@@ -1,14 +1,13 @@
 name: shellcheck
 
+# PR-gating workflow. Runs on every push/pull-request per RULESET-POLICY.md —
+# `paths:` filters are intentionally omitted so every PR produces the
+# `ShellCheck` check required by the branch ruleset. Repo-wide *.sh scan
+# completes in ~5s.
+
 on:
   push:
-    paths:
-      - '**/*.sh'
-      - '.github/workflows/shellcheck.yml'
   pull_request:
-    paths:
-      - '**/*.sh'
-      - '.github/workflows/shellcheck.yml'
 
 jobs:
   shellcheck:
