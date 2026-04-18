@@ -580,6 +580,17 @@ if [ -n "$PRESET_REQUEST" ]; then
 fi
 _resolve_repo
 
+# P0-6: Self-recursion guard — if REPORT_REPO resolves to the repo this plugin
+# ships from, emit a breadcrumb and exit without creating a GitHub Issue.
+# Prevents infinite incident loops when operators edit error-reporter source
+# (either Desktop/project/kb-cc-plugin or a /tmp/kb-cc-issue-* worktree).
+# Override for forks via ERROR_REPORTER_SELF_REPO env. See kb-cc-plugin#28.
+SELF_REPO="${ERROR_REPORTER_SELF_REPO:-pmmm114/kb-cc-plugin}"
+if [ -n "$REPORT_REPO" ] && [ "$REPORT_REPO" = "$SELF_REPO" ]; then
+  log_line "[$TS] status=self_suppress event=$EVENT sid=$SESSION cwd_repo=$REPORT_REPO"
+  exit 0
+fi
+
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // ""')
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // ""')
 
