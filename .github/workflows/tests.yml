@@ -27,3 +27,5 @@ jobs:
         run: bash error-reporter/tests/verify_preset_equivalence.sh
       - name: unit_incident_to_eval.sh
         run: bash error-reporter/tests/unit_incident_to_eval.sh
+      - name: unit_ensure_labels.sh
+        run: bash error-reporter/tests/unit_ensure_labels.sh
