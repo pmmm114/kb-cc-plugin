@@ -1,0 +1,88 @@
+name: label-audit
+
+# Weekly cron that counts `reporter:*` labels on the repository and files
+# a warning issue if the total exceeds the policy threshold (≤30). The
+# 5-axis schema in #22 is intentionally bounded — the cluster and repo
+# axes accrete values over time, so this workflow catches runaway growth
+# before dashboards become unusable.
+#
+# Policy: see .github/RULESET-POLICY.md (#27, #30) for the broader CI
+# governance. This workflow is NOT in the branch ruleset's
+# required_status_checks — it runs on a cron, not on PRs.
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'    # Monday 00:00 UTC
+  workflow_dispatch:        # allow manual trigger for ad-hoc audits
+
+permissions:
+  issues: write              # file the warning issue when threshold breached
+  contents: read
+
+jobs:
+  audit:
+    name: reporter:* label audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count reporter:* labels
+        id: count
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # gh label list returns tab-separated name/description/color.
+          # Filter to labels starting with "reporter:" and count unique names.
+          REPORTER_LABELS=$(gh label list --repo "${{ github.repository }}" --limit 200 --json name --jq '.[] | .name' | grep -c '^reporter:' || true)
+          echo "count=$REPORTER_LABELS" >> "$GITHUB_OUTPUT"
+          echo "Found $REPORTER_LABELS reporter:* labels"
+      - name: Warn if threshold exceeded
+        if: steps.count.outputs.count > 30
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COUNT: ${{ steps.count.outputs.count }}
+        run: |
+          # Idempotency: skip if an open audit-warning issue already exists
+          # this week. Title includes ISO week so re-runs within the same
+          # week don't stack.
+          WEEK_TAG=$(date -u +'%Y-W%V')
+          TITLE="[label-audit] reporter:* label count exceeds policy threshold (week $WEEK_TAG)"
+          EXISTING=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --search "$TITLE in:title is:open" \
+            --json number \
+            --jq 'length')
+          if [ "$EXISTING" -gt 0 ]; then
+            echo "Open audit issue already filed for $WEEK_TAG — skipping."
+            exit 0
+          fi
+          BODY="The \`reporter:*\` label count on this repository is **$COUNT**, which exceeds the policy threshold of 30 defined in \`.github/RULESET-POLICY.md\`.
+
+## What this means
+
+The 5-axis label schema (#22) is designed to stay bounded. Runaway growth is usually one of:
+
+- **\`reporter:cluster:*\` fanout** — a code path producing distinct 12-char hashes per incident (hash collision is not the problem; the *input* to the hash is too diverse). Investigate whether the hash input tuple \`hook:phase:severity:agent\` actually clusters related incidents.
+- **\`reporter:repo:*\` accretion** — the plugin has been used against many repos. Prune stale \`reporter:repo:<owner>__<repo>\` labels that no longer correspond to active work.
+- **\`reporter:hook:*\` new hooks** — harness added hooks without updating any schema. Usually benign; acknowledge and close.
+
+## Pruning
+
+\`\`\`bash
+gh label list --repo ${{ github.repository }} --limit 200 --json name --jq '.[] | select(.name | startswith(\"reporter:cluster:\")) | .name'
+# identify stale entries, then:
+gh label delete <name> --repo ${{ github.repository }} --yes
+\`\`\`
+
+## Policy reference
+
+- Audit workflow: \`.github/workflows/label-audit.yml\`
+- Schema source: \`error-reporter/scripts/report.sh\` (function \`_five_axis_labels\`)
+- Originating issue: #22 (5-axis labels)
+
+This is an automated warning. Closing it is fine if you've reviewed the labels and the count is justified for the current usage pattern."
+
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "$TITLE" \
+            --label "plugin:error-reporter" \
+            --body "$BODY"
