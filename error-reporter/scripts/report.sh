@@ -774,6 +774,57 @@ AGENT_FIELD="$AGENT_ID"
 
   TITLE="[incident] $EVENT${AGENT_ID:+($AGENT_ID)} (${SESSION:0:8})"
 
+  # F5 (#40): session-local base rate for TRIGGER_HOOK.
+  # deny/total ratio over this session's debug log (already at $LOG_FILE).
+  # Purely local computation — no cross-repo reads by default. Optional
+  # git-log enrichment gated behind ERROR_REPORTER_BASE_RATES_INCLUDE_GIT=true.
+  #
+  # IMPORTANT: TRIGGER_HOOK is the EXTRACTED name (via PRESET_HOOK_EXTRACT_JQ
+  # which may capture from `.reason` per P0-1). To count correctly we must
+  # compare against the SAME extraction on each log entry — otherwise, when
+  # the preset uses reason-prefix extraction, `.hook` in the log carries the
+  # library wrapper ("hook-lib.sh") while TRIGGER_HOOK is the guard name.
+  BASE_RATES_TEXT="(no hook context — skipping base-rate calculation)"
+  if [ -n "$TRIGGER_HOOK" ] && [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ] \
+     && [ -n "$PRESET_HOOK_EXTRACT_JQ" ]; then
+    BR_TOTAL=$(jq -c --arg h "$TRIGGER_HOOK" \
+      "select($PRESET_HOOK_EXTRACT_JQ == \$h)" "$LOG_FILE" 2>/dev/null \
+      | wc -l | tr -d ' ')
+    BR_DENY=$(jq -c --arg h "$TRIGGER_HOOK" \
+      "select($PRESET_HOOK_EXTRACT_JQ == \$h) | select(.decision == \"deny\" or .decision == \"block\")" \
+      "$LOG_FILE" 2>/dev/null | wc -l | tr -d ' ')
+    BR_TOTAL=${BR_TOTAL:-0}
+    BR_DENY=${BR_DENY:-0}
+    if [ "$BR_TOTAL" -gt 0 ]; then
+      BR_ALLOW=$((BR_TOTAL - BR_DENY))
+      BR_PCT=$(awk -v d="$BR_DENY" -v t="$BR_TOTAL" 'BEGIN { printf "%.1f", (d * 100.0) / t }')
+      BASE_RATES_TEXT="\`$TRIGGER_HOOK\` fired **$BR_TOTAL time(s)** this session (**$BR_DENY deny** / $BR_ALLOW allow — **${BR_PCT}% deny**)"
+    else
+      BASE_RATES_TEXT="(no prior activity for \`$TRIGGER_HOOK\` this session)"
+    fi
+  fi
+
+  # Optional: git-log enrichment (5 most recent commits touching the hook file).
+  # Read-only access to $CLAUDE_CONFIG_DIR — not a HG-5 crossing (governs writes).
+  # Gated behind env opt-in so default behavior stays narrow.
+  if [ "${ERROR_REPORTER_BASE_RATES_INCLUDE_GIT:-false}" = "true" ] && [ -n "$TRIGGER_HOOK" ]; then
+    BR_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-harness}"
+    BR_HOOK_PATH="hooks/$TRIGGER_HOOK"
+    if [ -f "$BR_CONFIG_DIR/$BR_HOOK_PATH" ] \
+       && git -C "$BR_CONFIG_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+      BR_RECENT=$(git -C "$BR_CONFIG_DIR" log --oneline -5 -- "$BR_HOOK_PATH" 2>/dev/null)
+      if [ -n "$BR_RECENT" ]; then
+        BASE_RATES_TEXT="$BASE_RATES_TEXT
+
+Recent commits on \`$BR_HOOK_PATH\`:
+
+\`\`\`
+$BR_RECENT
+\`\`\`"
+      fi
+    fi
+  fi
+
   # #24: extract the decisive entry — the first deny/fail line from the
   # last 50 lines of the debug log — with ±5 lines of context for signal
   # concentration. Falls back to the full tail when no match is found.
@@ -820,8 +871,7 @@ ${DECISIVE_CONTEXT}
 
 ## Base Rates
 
-<!-- TODO #24 follow-up: deny/total ratio for \`${TRIGGER_HOOK:-unknown}\`
-     + recent 5 commits on touched component. Requires harness repo access. -->
+${BASE_RATES_TEXT}
 
 ## Related Meta-Eval
 
