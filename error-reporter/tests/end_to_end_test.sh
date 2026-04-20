@@ -782,6 +782,76 @@ else
 fi
 cleanup_session "$SID" "$TD"
 
+# --- Test 17: Base Rates section populated with session-local deny/total ratio (#40 / F5) ---
+printf '\nTest 17: Base Rates section shows deny/total ratio for TRIGGER_HOOK\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t17-$$-$(date +%s)"
+mkdir -p "$TD/markers"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"
+
+# Seed a debug log with 10 entries for verify-before-done guard: 4 deny + 6 allow.
+# Real harness sets `.reason = "[sid:x] [hook.sh] ..."` on both deny and allow
+# decisions, so extraction produces the SAME hook name for both. Expected
+# base rate: 40.0% deny.
+mkdir -p /tmp/claude-debug
+{
+  for i in 1 2 3 4; do
+    printf '{"ts":"t%d","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"[sid:x] [verify-before-done.sh] blocked","phase":"verifying","session":"%s"}\n' "$i" "$SID"
+  done
+  for i in 5 6 7 8 9 10; do
+    printf '{"ts":"t%d","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"allow","reason":"[sid:x] [verify-before-done.sh] ok","phase":"executing","session":"%s"}\n' "$i" "$SID"
+  done
+} > "/tmp/claude-debug/$SID.jsonl"
+
+INPUT=$(printf '{"hook_event_name":"SubagentStop","session_id":"%s","cwd":"","agent_id":"editor"}' "$SID")
+CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo \
+  bash -c "printf '%s' '$INPUT' | bash '$SCRIPT'"
+wait_for_background "$SID" "$TD/markers"
+
+FALLBACK_FILE=$(ls "$TD/reports/${SID}-"*".md" 2>/dev/null | head -1)
+if [ -n "$FALLBACK_FILE" ] && [ -f "$FALLBACK_FILE" ]; then
+  grep -qF '## Base Rates' "$FALLBACK_FILE" \
+    && pass "T17 Base Rates section header present" \
+    || fail "T17 Base Rates header missing"
+  grep -qE 'fired \*\*10 time\(s\)\*\*' "$FALLBACK_FILE" \
+    && pass "T17 Base Rates shows total count (10)" \
+    || fail "T17 Base Rates total count wrong"
+  grep -qE '\*\*4 deny\*\*' "$FALLBACK_FILE" \
+    && pass "T17 Base Rates shows deny count (4)" \
+    || fail "T17 Base Rates deny count wrong"
+  grep -qE '\*\*40\.0% deny\*\*' "$FALLBACK_FILE" \
+    && pass "T17 Base Rates shows percentage (40.0%)" \
+    || fail "T17 Base Rates percentage wrong"
+  if grep -qF 'Recent commits on' "$FALLBACK_FILE"; then
+    fail "T17 git enrichment appeared without env opt-in"
+  else
+    pass "T17 git enrichment correctly gated off (env unset)"
+  fi
+else
+  fail "T17 no fallback .md"
+fi
+cleanup_session "$SID" "$TD"
+
+# --- Test 17b: empty debug log → Base Rates does not crash the script ---
+printf '\nTest 17b: Base Rates handles empty debug log gracefully\n'
+TD=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+SID="smoke-t17b-$$-$(date +%s)"
+mkdir -p "$TD/markers"
+touch "$TD/markers/.v3.1-opt-in-notice.ack"
+
+mkdir -p /tmp/claude-debug
+: > "/tmp/claude-debug/$SID.jsonl"
+
+INPUT=$(printf '{"hook_event_name":"SubagentStop","session_id":"%s","cwd":"","agent_id":"editor"}' "$SID")
+CLAUDE_PLUGIN_DATA="$TD" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+  ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo \
+  bash -c "printf '%s' '$INPUT' | bash '$SCRIPT'" 2>/dev/null
+RC=$?
+[ "$RC" -eq 0 ] && pass "T17b empty debug log does not crash the script" \
+  || fail "T17b empty log crashed exit $RC"
+cleanup_session "$SID" "$TD"
+
 # --- Test 15b: reporter:repo:* flatten handles underscores in owner/repo (#33) ---
 # The previous tr+sed transform misfired when owner or repo names contained
 # underscores. This test locks in the corrected behavior across three cases.
