@@ -852,6 +852,158 @@ RC=$?
   || fail "T17b empty log crashed exit $RC"
 cleanup_session "$SID" "$TD"
 
+# --- Test 18: Related Meta-Eval section (#42 / F7) ---
+# Populates ## Related Meta-Eval via read-only scan of
+# $CLAUDE_CONFIG_DIR/benchmarks/meta-evals/. Four branches:
+#   a. exact filename match
+#   b. tag substring match
+#   c. coverage-gap (nothing matches)
+#   d. directory unreachable
+printf '\nTest 18: Related Meta-Eval lookup — 4 branches\n'
+
+run_t18_case() {
+  local label="$1"
+  local fake_config_dir="$2"   # empty → unset CLAUDE_CONFIG_DIR
+  local expected_substr="$3"
+  local td sid
+  td=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+  sid="smoke-t18-${label}-$(date +%s%N)-$RANDOM"
+  mkdir -p "$td/markers"
+  touch "$td/markers/.v3.1-opt-in-notice.ack"
+  mkdir -p /tmp/claude-debug
+  {
+    printf '{"ts":"t1","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"[sid:x] [verify-before-done.sh] blocked","phase":"verifying","session":"%s"}\n' "$sid"
+  } > "/tmp/claude-debug/$sid.jsonl"
+  local payload
+  payload=$(printf '{"hook_event_name":"SubagentStop","session_id":"%s","cwd":"","agent_id":"editor"}' "$sid")
+
+  if [ -n "$fake_config_dir" ]; then
+    CLAUDE_PLUGIN_DATA="$td" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" CLAUDE_CONFIG_DIR="$fake_config_dir" \
+      ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo \
+      bash -c "printf '%s' '$payload' | bash '$SCRIPT'"
+  else
+    CLAUDE_PLUGIN_DATA="$td" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" \
+      bash -c "unset CLAUDE_CONFIG_DIR; export CLAUDE_PLUGIN_DATA='$td' CLAUDE_PLUGIN_ROOT='$PLUGIN_ROOT' ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo; printf '%s' '$payload' | bash '$SCRIPT'"
+  fi
+  wait_for_background "$sid" "$td/markers"
+  local fb
+  fb=$(ls "$td/reports/${sid}-"*".md" 2>/dev/null | head -1)
+  if [ -n "$fb" ] && grep -qF "$expected_substr" "$fb"; then
+    pass "T18 ($label): found expected substring '$expected_substr'"
+  else
+    local actual
+    actual=$(awk '/^## Related Meta-Eval/{p=1} /^## Known Drift/{p=0} p' "$fb" 2>/dev/null | head -3)
+    fail "T18 ($label): expected '$expected_substr', section shows: $actual"
+  fi
+  cleanup_session "$sid" "$td"
+}
+
+# Case a: exact filename match
+T18_CFG=$(mktemp -d "/tmp/er-t18-cfg-XXXXXX")
+mkdir -p "$T18_CFG/benchmarks/meta-evals"
+echo '{"id":"verify-before-done","tags":[]}' > "$T18_CFG/benchmarks/meta-evals/verify-before-done.json"
+run_t18_case "exact" "$T18_CFG" "Exact: \`benchmarks/meta-evals/verify-before-done.json\`"
+rm -rf "$T18_CFG"
+
+# Case b: tag substring match
+T18_CFG=$(mktemp -d "/tmp/er-t18-cfg-XXXXXX")
+mkdir -p "$T18_CFG/benchmarks/meta-evals"
+echo '{"id":"other","tags":["hook:verify-before-done","rule:something"]}' > "$T18_CFG/benchmarks/meta-evals/other.json"
+run_t18_case "tag-match" "$T18_CFG" "Related: \`benchmarks/meta-evals/other.json\`"
+rm -rf "$T18_CFG"
+
+# Case c: coverage-gap
+T18_CFG=$(mktemp -d "/tmp/er-t18-cfg-XXXXXX")
+mkdir -p "$T18_CFG/benchmarks/meta-evals"
+echo '{"id":"unrelated","tags":["hook:something-else"]}' > "$T18_CFG/benchmarks/meta-evals/unrelated.json"
+run_t18_case "coverage-gap" "$T18_CFG" "**coverage-gap**"
+rm -rf "$T18_CFG"
+
+# Case d: directory unreachable
+run_t18_case "unreachable" "/tmp/nonexistent-$(date +%s)-$RANDOM" "meta-eval directory unreachable"
+
+# --- Test 19: Known Drift Match section (#43 / F8) ---
+# Populates ## Known Drift Match via awk-extracted §"Known drift & risks"
+# from $CLAUDE_CONFIG_DIR/CLAUDE.md, then grep for TRIGGER_HOOK references.
+printf '\nTest 19: Known Drift Match — 4 branches\n'
+
+run_t19_case() {
+  local label="$1"
+  local fake_config_dir="$2"
+  local expected_substr="$3"
+  local td sid
+  td=$(mktemp -d "/tmp/er-smoke-XXXXXX")
+  sid="smoke-t19-${label}-$(date +%s%N)-$RANDOM"
+  mkdir -p "$td/markers"
+  touch "$td/markers/.v3.1-opt-in-notice.ack"
+  mkdir -p /tmp/claude-debug
+  printf '{"ts":"t1","event":"PreToolUse","hook":"pre-edit-guard.sh","decision":"deny","reason":"[sid:x] [verify-before-done.sh] blocked","phase":"verifying","session":"%s"}\n' \
+    "$sid" > "/tmp/claude-debug/$sid.jsonl"
+  local payload
+  payload=$(printf '{"hook_event_name":"SubagentStop","session_id":"%s","cwd":"","agent_id":"editor"}' "$sid")
+
+  CLAUDE_PLUGIN_DATA="$td" CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT" CLAUDE_CONFIG_DIR="$fake_config_dir" \
+    ERROR_REPORTER_PRESET=claude-harness ERROR_REPORTER_REPO=dummy/repo \
+    bash -c "printf '%s' '$payload' | bash '$SCRIPT'"
+  wait_for_background "$sid" "$td/markers"
+  local fb
+  fb=$(ls "$td/reports/${sid}-"*".md" 2>/dev/null | head -1)
+  if [ -n "$fb" ] && grep -qF "$expected_substr" "$fb"; then
+    pass "T19 ($label): found expected substring '$expected_substr'"
+  else
+    local actual
+    actual=$(awk '/^## Known Drift/{p=1} /^## Reproduction/{p=0} p' "$fb" 2>/dev/null | head -5)
+    fail "T19 ($label): expected '$expected_substr', section shows: $actual"
+  fi
+  cleanup_session "$sid" "$td"
+}
+
+# Case a: match found in §"Known drift"
+T19_CFG=$(mktemp -d "/tmp/er-t19-cfg-XXXXXX")
+cat > "$T19_CFG/CLAUDE.md" <<'CMD'
+# Harness CLAUDE.md
+
+## Something else
+
+Unrelated content.
+
+## Known drift & risks
+
+1. **`verify-before-done` races with editor agent** — flaky guard-check.
+2. Other unrelated issue.
+
+## Yet another section
+
+stuff
+CMD
+run_t19_case "match" "$T19_CFG" 'match(es) in `CLAUDE.md`'
+rm -rf "$T19_CFG"
+
+# Case b: section exists but no match for this hook
+T19_CFG=$(mktemp -d "/tmp/er-t19-cfg-XXXXXX")
+cat > "$T19_CFG/CLAUDE.md" <<'CMD'
+## Known drift & risks
+
+1. `unrelated-hook.sh` issue.
+CMD
+run_t19_case "no-match" "$T19_CFG" 'No references to'
+rm -rf "$T19_CFG"
+
+# Case c: no §"Known drift" section at all
+T19_CFG=$(mktemp -d "/tmp/er-t19-cfg-XXXXXX")
+cat > "$T19_CFG/CLAUDE.md" <<'CMD'
+# Harness CLAUDE.md
+
+## Overview
+
+Content without the Known drift header.
+CMD
+run_t19_case "section-absent" "$T19_CFG" 'no §"Known drift & risks" section'
+rm -rf "$T19_CFG"
+
+# Case d: CLAUDE.md unreachable
+run_t19_case "unreachable" "/tmp/nonexistent-$(date +%s)-$RANDOM" 'CLAUDE.md` unreachable'
+
 # --- Test 15b: reporter:repo:* flatten handles underscores in owner/repo (#33) ---
 # The previous tr+sed transform misfired when owner or repo names contained
 # underscores. This test locks in the corrected behavior across three cases.

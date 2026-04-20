@@ -825,6 +825,74 @@ $BR_RECENT
     fi
   fi
 
+  # F7 (#42): Related Meta-Eval lookup.
+  # Read-only enumeration of $CLAUDE_CONFIG_DIR/benchmarks/meta-evals/*.json
+  # for an eval that matches TRIGGER_HOOK. Not a HG-5 crossing (reads only).
+  # Outputs one of: exact pointer, tag-related pointer, coverage-gap badge,
+  # or a diagnostic when the directory is unreachable.
+  RELATED_EVAL_TEXT="(no hook context — skipping meta-eval lookup)"
+  if [ -n "$TRIGGER_HOOK" ]; then
+    ME_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-harness}/benchmarks/meta-evals"
+    HOOK_STEM="${TRIGGER_HOOK%.sh}"
+    if [ ! -d "$ME_DIR" ]; then
+      RELATED_EVAL_TEXT="(meta-eval directory unreachable — \`\$CLAUDE_CONFIG_DIR/benchmarks/meta-evals\` missing)"
+    elif [ -f "$ME_DIR/${HOOK_STEM}.json" ]; then
+      RELATED_EVAL_TEXT="Exact: \`benchmarks/meta-evals/${HOOK_STEM}.json\` — run via \`python3 benchmarks/run.py --tag hook:${HOOK_STEM}\`"
+    else
+      # Substring tag match: scan each .json for a "hook:<stem>" tag
+      ME_MATCH=""
+      for f in "$ME_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        if grep -q "\"hook:${HOOK_STEM}\"" "$f" 2>/dev/null; then
+          ME_MATCH=$(basename "$f")
+          break
+        fi
+      done
+      if [ -n "$ME_MATCH" ]; then
+        RELATED_EVAL_TEXT="Related: \`benchmarks/meta-evals/${ME_MATCH}\` (tagged \`hook:${HOOK_STEM}\`)"
+      else
+        RELATED_EVAL_TEXT="**coverage-gap** — no meta-eval covers \`${TRIGGER_HOOK}\`. Scaffold via \`python3 error-reporter/scripts/incident-to-eval.py --issue <this-url>\`."
+      fi
+    fi
+  fi
+
+  # F8 (#43): Known Drift Match — grep $CLAUDE_CONFIG_DIR/CLAUDE.md
+  # §"Known drift & risks" for TRIGGER_HOOK references. Read-only; HG-5 safe.
+  # awk range extracts the section so matches outside the section don't leak.
+  KNOWN_DRIFT_TEXT="(no hook context — skipping drift check)"
+  if [ -n "$TRIGGER_HOOK" ]; then
+    DRIFT_MD="${CLAUDE_CONFIG_DIR:-$HOME/.claude-harness}/CLAUDE.md"
+    KD_STEM="${TRIGGER_HOOK%.sh}"
+    if [ ! -f "$DRIFT_MD" ]; then
+      KNOWN_DRIFT_TEXT="(\`CLAUDE.md\` unreachable at \`\$CLAUDE_CONFIG_DIR\` — cannot check drift.)"
+    else
+      # Extract the "## Known drift & risks" section (up to next H2)
+      KD_SECTION=$(awk '
+        /^## Known drift/ { in_sect = 1; next }
+        /^## / && in_sect { exit }
+        in_sect { print }
+      ' "$DRIFT_MD")
+      if [ -z "$KD_SECTION" ]; then
+        KNOWN_DRIFT_TEXT="(\`CLAUDE.md\` has no §\"Known drift & risks\" section.)"
+      else
+        # Match either bare stem or stem.sh; limit to 3 occurrences
+        KD_MATCHES=$(printf '%s\n' "$KD_SECTION" \
+          | grep -nE "\`${KD_STEM}\b|\`${TRIGGER_HOOK}\`" \
+          | head -3)
+        if [ -z "$KD_MATCHES" ]; then
+          KNOWN_DRIFT_TEXT="No references to \`${TRIGGER_HOOK}\` in \`CLAUDE.md\` §\"Known drift & risks\"."
+        else
+          KD_COUNT=$(printf '%s\n' "$KD_MATCHES" | wc -l | tr -d ' ')
+          KNOWN_DRIFT_TEXT="Found ${KD_COUNT} match(es) in \`CLAUDE.md\` §\"Known drift & risks\":
+
+\`\`\`
+$KD_MATCHES
+\`\`\`"
+        fi
+      fi
+    fi
+  fi
+
   # #24: extract the decisive entry — the first deny/fail line from the
   # last 50 lines of the debug log — with ±5 lines of context for signal
   # concentration. Falls back to the full tail when no match is found.
@@ -875,13 +943,11 @@ ${BASE_RATES_TEXT}
 
 ## Related Meta-Eval
 
-<!-- TODO #24 follow-up: pointer to \`benchmarks/meta-evals/${TRIGGER_HOOK%.*}.json\`
-     or \`coverage-gap\` badge. Requires harness \`benchmarks/meta-evals/\` enumeration. -->
+${RELATED_EVAL_TEXT}
 
 ## Known Drift Match
 
-<!-- TODO #24 follow-up: auto-grep \$CLAUDE_CONFIG_DIR/CLAUDE.md
-     §\"Known drift & risks\" for \`${TRIGGER_HOOK:-unknown}\` references. -->
+${KNOWN_DRIFT_TEXT}
 
 ## Reproduction
 
