@@ -1,4 +1,4 @@
-name: tests
+name: Run Tests
 
 # PR-gating workflow. Runs on every push/pull-request per RULESET-POLICY.md —
 # `paths:` filters are intentionally omitted so every PR produces the

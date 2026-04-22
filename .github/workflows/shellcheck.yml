@@ -1,4 +1,4 @@
-name: shellcheck
+name: Lint Shell Scripts
 
 # PR-gating workflow. Runs on every push/pull-request per RULESET-POLICY.md —
 # `paths:` filters are intentionally omitted so every PR produces the
@@ -23,3 +23,13 @@ jobs:
           # error-reporter only because dashboard/tests/bridge_enrichment_test.sh
           # had two pre-existing SC2188 warnings. Those are fixed in issue #13,
           # so the gate now covers every *.sh in the repo.
+      - name: Run actionlint
+        # Catches the class of YAML-block-scalar bugs that caused
+        # label-audit.yml + incident-staleness.yml startup failures —
+        # multi-line shell strings inside `run: |` with continuation
+        # lines below the YAML indent column. Runs inside the existing
+        # `ShellCheck` job so the ruleset's required_status_checks entry
+        # stays unchanged (no gh api rulesets PATCH needed).
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -color
