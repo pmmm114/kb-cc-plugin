@@ -137,5 +137,104 @@ if len(a) == 0: sys.exit(3)
 fi
 rm -f "$TMP"
 
+# --- Case 9: inversion rule matches (pre-edit-guard + planning) → draft:false ---
+TMP=$(mktemp "/tmp/iteval-XXXXXX.json")
+python3 "$SCRIPT" --file "$FX/pre_edit_guard_planning.md" --out "$TMP" 2>/dev/null
+RC=$?
+[ "$RC" -eq 0 ] && pass "Case 9 exit 0 on pre-edit-guard+planning fixture" || fail "Case 9 exit $RC"
+if [ -s "$TMP" ]; then
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('draft') is False else 1)" "$TMP" \
+    && pass "Case 9 inversion rule flips draft to false" \
+    || fail "Case 9 draft is not false (inversion rule did not apply)"
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if any(a.get('type')=='tool_not_used' and a.get('expect')=='Edit' for a in d.get('assertions',[])) else 1)" "$TMP" \
+    && pass "Case 9 assertion list contains tool_not_used(Edit)" \
+    || fail "Case 9 missing tool_not_used(Edit) assertion"
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('workspace_files') and d.get('reference_solution',{}).get('files') else 1)" "$TMP" \
+    && pass "Case 9 workspace_files + reference_solution.files populated" \
+    || fail "Case 9 workspace or reference_solution empty"
+  # HG-9 guard: every assertion (including inversion-supplied ones) is deterministic
+  python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+allowed = {'file_contains','not_file_contains','output_contains','output_not_contains','tool_was_used','tool_not_used','file_exists','max_files_changed','tool_call_count'}
+sys.exit(0 if all(a.get('type') in allowed for a in d.get('assertions',[])) else 1)
+" "$TMP" \
+    && pass "Case 9 all assertions are HG-9 deterministic" \
+    || fail "Case 9 non-deterministic assertion leaked"
+  # F1 regression guard: dedupe by (type, expect, path) — no duplicates
+  python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+keys = [(a.get('type'), a.get('expect'), a.get('path')) for a in d.get('assertions',[])]
+sys.exit(0 if len(keys) == len(set(keys)) else 1)
+" "$TMP" \
+    && pass "Case 9 no duplicate assertions (rule + generic dedupe)" \
+    || fail "Case 9 duplicate assertion key detected"
+else
+  fail "Case 9 output file empty"
+fi
+rm -f "$TMP"
+
+# --- Case 9b: rule matches on the other two phases (reviewing, plan_review) ---
+# Synthesize phase variants by sed-swapping the primary fixture's phase cell.
+for alt_phase in reviewing plan_review; do
+  TMP_FX=$(mktemp "/tmp/fx-XXXXXX.md")
+  sed "s/\`planning\`/\`${alt_phase}\`/" "$FX/pre_edit_guard_planning.md" > "$TMP_FX"
+  TMP=$(mktemp "/tmp/iteval-XXXXXX.json")
+  python3 "$SCRIPT" --file "$TMP_FX" --out "$TMP" 2>/dev/null
+  if [ -s "$TMP" ]; then
+    python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('draft') is False else 1)" "$TMP" \
+      && pass "Case 9b phase=${alt_phase} inversion flips draft:false" \
+      || fail "Case 9b phase=${alt_phase} draft not flipped"
+  else
+    fail "Case 9b phase=${alt_phase} output empty"
+  fi
+  rm -f "$TMP" "$TMP_FX"
+done
+
+# --- Case 9c: rule does NOT match other phases (idle, executing, verifying) ---
+for idle_phase in idle executing verifying; do
+  TMP_FX=$(mktemp "/tmp/fx-XXXXXX.md")
+  sed "s/\`planning\`/\`${idle_phase}\`/" "$FX/pre_edit_guard_planning.md" > "$TMP_FX"
+  TMP=$(mktemp "/tmp/iteval-XXXXXX.json")
+  python3 "$SCRIPT" --file "$TMP_FX" --out "$TMP" 2>/dev/null
+  if [ -s "$TMP" ]; then
+    python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('draft') is True else 1)" "$TMP" \
+      && pass "Case 9c phase=${idle_phase} falls through (draft:true)" \
+      || fail "Case 9c phase=${idle_phase} unexpectedly matched rule"
+  else
+    fail "Case 9c phase=${idle_phase} output empty"
+  fi
+  rm -f "$TMP" "$TMP_FX"
+done
+
+# --- Case 10: --no-inversion bypass → draft:true even on matching fixture ---
+TMP=$(mktemp "/tmp/iteval-XXXXXX.json")
+python3 "$SCRIPT" --file "$FX/pre_edit_guard_planning.md" --no-inversion --out "$TMP" 2>/dev/null
+RC=$?
+[ "$RC" -eq 0 ] && pass "Case 10 exit 0 with --no-inversion" || fail "Case 10 exit $RC"
+if [ -s "$TMP" ]; then
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('draft') is True else 1)" "$TMP" \
+    && pass "Case 10 --no-inversion forces draft:true" \
+    || fail "Case 10 --no-inversion did not force draft:true"
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('workspace_files')=={} and d.get('reference_solution',{}).get('files')=={} else 1)" "$TMP" \
+    && pass "Case 10 --no-inversion keeps workspace/reference empty" \
+    || fail "Case 10 --no-inversion unexpectedly populated workspace"
+else
+  fail "Case 10 output file empty"
+fi
+rm -f "$TMP"
+
+# --- Case 11: fixture with no matching rule → draft:true fallthrough ---
+# filled_valid.md has phase=verifying → does NOT match pre-edit-guard rule
+TMP=$(mktemp "/tmp/iteval-XXXXXX.json")
+python3 "$SCRIPT" --file "$FX/filled_valid.md" --out "$TMP" 2>/dev/null
+if [ -s "$TMP" ]; then
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('draft') is True else 1)" "$TMP" \
+    && pass "Case 11 non-matching rule falls through to draft:true" \
+    || fail "Case 11 filled_valid.md unexpectedly matched a rule"
+fi
+rm -f "$TMP"
+
 printf '\nSummary: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] && exit 0 || exit 1
