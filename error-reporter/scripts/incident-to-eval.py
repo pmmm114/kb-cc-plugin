@@ -235,8 +235,19 @@ def build_eval(
         workspace_files = dict(result.workspace_files)
         reference_solution_files = dict(result.reference_solution_files)
         # Merge rule-supplied assertions in front of the generic ones so
-        # deterministic checks are the primary failure signal.
-        assertions = list(result.assertions) + assertions
+        # deterministic checks are the primary failure signal. Dedupe by
+        # (type, expect, path) tuple — generic derive_assertions() often
+        # re-emits the same hook-stem output_contains that rules already
+        # supply, which would bloat the eval with redundant checks.
+        merged = list(result.assertions) + assertions
+        seen: set = set()
+        assertions = []
+        for a in merged:
+            key = (a.get("type"), a.get("expect"), a.get("path"))
+            if key in seen:
+                continue
+            seen.add(key)
+            assertions.append(a)
         if result.prompt_addendum:
             prompt = prompt + "\n\n" + result.prompt_addendum
         reference_solution_description = (

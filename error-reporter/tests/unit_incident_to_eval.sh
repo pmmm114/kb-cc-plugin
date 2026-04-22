@@ -161,10 +161,52 @@ sys.exit(0 if all(a.get('type') in allowed for a in d.get('assertions',[])) else
 " "$TMP" \
     && pass "Case 9 all assertions are HG-9 deterministic" \
     || fail "Case 9 non-deterministic assertion leaked"
+  # F1 regression guard: dedupe by (type, expect, path) — no duplicates
+  python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+keys = [(a.get('type'), a.get('expect'), a.get('path')) for a in d.get('assertions',[])]
+sys.exit(0 if len(keys) == len(set(keys)) else 1)
+" "$TMP" \
+    && pass "Case 9 no duplicate assertions (rule + generic dedupe)" \
+    || fail "Case 9 duplicate assertion key detected"
 else
   fail "Case 9 output file empty"
 fi
 rm -f "$TMP"
+
+# --- Case 9b: rule matches on the other two phases (reviewing, plan_review) ---
+# Synthesize phase variants by sed-swapping the primary fixture's phase cell.
+for alt_phase in reviewing plan_review; do
+  TMP_FX=$(mktemp "/tmp/fx-XXXXXX.md")
+  sed "s/\`planning\`/\`${alt_phase}\`/" "$FX/pre_edit_guard_planning.md" > "$TMP_FX"
+  TMP=$(mktemp "/tmp/iteval-XXXXXX.json")
+  python3 "$SCRIPT" --file "$TMP_FX" --out "$TMP" 2>/dev/null
+  if [ -s "$TMP" ]; then
+    python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('draft') is False else 1)" "$TMP" \
+      && pass "Case 9b phase=${alt_phase} inversion flips draft:false" \
+      || fail "Case 9b phase=${alt_phase} draft not flipped"
+  else
+    fail "Case 9b phase=${alt_phase} output empty"
+  fi
+  rm -f "$TMP" "$TMP_FX"
+done
+
+# --- Case 9c: rule does NOT match other phases (idle, executing, verifying) ---
+for idle_phase in idle executing verifying; do
+  TMP_FX=$(mktemp "/tmp/fx-XXXXXX.md")
+  sed "s/\`planning\`/\`${idle_phase}\`/" "$FX/pre_edit_guard_planning.md" > "$TMP_FX"
+  TMP=$(mktemp "/tmp/iteval-XXXXXX.json")
+  python3 "$SCRIPT" --file "$TMP_FX" --out "$TMP" 2>/dev/null
+  if [ -s "$TMP" ]; then
+    python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('draft') is True else 1)" "$TMP" \
+      && pass "Case 9c phase=${idle_phase} falls through (draft:true)" \
+      || fail "Case 9c phase=${idle_phase} unexpectedly matched rule"
+  else
+    fail "Case 9c phase=${idle_phase} output empty"
+  fi
+  rm -f "$TMP" "$TMP_FX"
+done
 
 # --- Case 10: --no-inversion bypass → draft:true even on matching fixture ---
 TMP=$(mktemp "/tmp/iteval-XXXXXX.json")
