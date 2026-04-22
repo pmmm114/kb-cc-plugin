@@ -22,12 +22,17 @@ Python stdlib only (no third-party deps).
 from __future__ import annotations
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
 from typing import Optional
+
+# Sibling module — added to sys.path below so it resolves regardless of cwd.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import incident_inversion_rules  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +199,11 @@ def derive_assertions(inc: Incident) -> list[dict]:
     return assertions
 
 
-def build_eval(inc: Incident, issue_sid_hint: Optional[str]) -> tuple[dict, list[str]]:
+def build_eval(
+    inc: Incident,
+    issue_sid_hint: Optional[str],
+    inversion_enabled: bool = True,
+) -> tuple[dict, list[str]]:
     """Build the meta-eval JSON. Returns (eval_dict, warnings)."""
     warnings: list[str] = []
 
@@ -204,31 +213,60 @@ def build_eval(inc: Incident, issue_sid_hint: Optional[str]) -> tuple[dict, list
     tags = derive_tags(inc)
     assertions = derive_assertions(inc)
 
-    # Draft flag + flaky stability when we cannot derive reference solution.
-    # The current MVP always marks as draft/flaky because deriving a fully
-    # automated reference_solution from prose is unreliable — follow-ups can
-    # harden specific hook patterns (test-driven inversion).
-    draft = True
-    warnings.append(
-        "draft:true + stability:flaky because reference_solution.files "
-        "cannot be derived automatically in MVP. A human must gate this "
-        "eval before it contributes to scoring."
+    # Default: MVP safety fallback — draft:true + empty workspace/reference.
+    # An inversion rule (see incident_inversion_rules.py) can flip off draft
+    # if it deterministically derives workspace_files + reference_solution.
+    workspace_files: dict = {}
+    reference_solution_files: dict = {}
+    reference_solution_description = (
+        "See the original incident issue body. Reviewer should fill "
+        "in the minimum file state that satisfies the assertions "
+        "above before removing `draft: true`."
     )
+    prompt = _prompt(inc)
+    draft = True
+
+    inversion_hit: Optional[tuple[str, incident_inversion_rules.InversionResult]] = None
+    if inversion_enabled:
+        inversion_hit = incident_inversion_rules.apply_inversion(inc)
+
+    if inversion_hit is not None:
+        rule_name, result = inversion_hit
+        workspace_files = dict(result.workspace_files)
+        reference_solution_files = dict(result.reference_solution_files)
+        # Merge rule-supplied assertions in front of the generic ones so
+        # deterministic checks are the primary failure signal.
+        assertions = list(result.assertions) + assertions
+        if result.prompt_addendum:
+            prompt = prompt + "\n\n" + result.prompt_addendum
+        reference_solution_description = (
+            f"Auto-derived by inversion rule `{rule_name}`. "
+            f"The file state above reproduces the post-deny workspace "
+            f"(hook denies the edit → files remain unchanged)."
+        )
+        draft = False
+        warnings.append(
+            f"inversion rule `{rule_name}` matched — draft:false, "
+            f"stability:flaky retained until ≥3 successful runs prove "
+            f"runtime fidelity (tracked in #41 PR 2+)."
+        )
+    else:
+        warnings.append(
+            "draft:true + stability:flaky because no inversion rule "
+            "matched. A human must fill reference_solution.files before "
+            "this eval contributes to scoring."
+        )
 
     eval_obj: dict = {
         "id": eval_id,
         "description": _description(inc),
         "tags": tags,
-        "prompt": _prompt(inc),
-        "workspace_files": {},
+        "prompt": prompt,
+        "workspace_files": workspace_files,
         "assertions": assertions,
         "reference_solution": {
-            "description": (
-                "See the original incident issue body. Reviewer should fill "
-                "in the minimum file state that satisfies the assertions "
-                "above before removing `draft: true`."
-            ),
-            "files": {},
+            "description": reference_solution_description,
+            "files": reference_solution_files,
         },
         "config": {
             "trials": 1,
@@ -304,6 +342,15 @@ def main() -> int:
             "Use only when back-filling historical incidents."
         ),
     )
+    parser.add_argument(
+        "--no-inversion",
+        action="store_true",
+        help=(
+            "disable inversion rule matching — forces draft:true MVP "
+            "fallback even when a known hook pattern would otherwise "
+            "auto-derive workspace/reference_solution."
+        ),
+    )
     args = parser.parse_args()
 
     body = read_input(args)
@@ -318,7 +365,11 @@ def main() -> int:
         )
         return 2
 
-    eval_obj, warnings = build_eval(inc, args.sid)
+    eval_obj, warnings = build_eval(
+        inc,
+        args.sid,
+        inversion_enabled=not args.no_inversion,
+    )
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
 
