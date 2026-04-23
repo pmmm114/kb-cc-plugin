@@ -55,13 +55,15 @@ jobs:
             echo "Open audit issue already filed for $WEEK_TAG — skipping."
             exit 0
           fi
-          # Heredoc → file → --body-file pattern: embedding a multi-line
-          # shell string directly inside `run: |` breaks the YAML block
-          # scalar when continuation lines sit below the block's column.
-          # Writing to a tmpfile and stripping the 10-col YAML indent keeps
-          # the body Markdown-clean.
+          # Heredoc → file → --body-file pattern. A multi-line shell
+          # string assigned inline (BODY="...") with continuation lines
+          # at column 0 would end the enclosing YAML `run: |` block
+          # scalar prematurely. Heredoc content is written to a tmpfile;
+          # YAML strips the block's base indent before bash parses, so
+          # the heredoc body and EOF land at column 0 without any
+          # post-processing.
           BODY_FILE=$(mktemp)
-          sed 's/^          //' > "$BODY_FILE" <<EOF
+          cat > "$BODY_FILE" <<EOF
           The \`reporter:*\` label count on this repository is **$COUNT**, which exceeds the policy threshold of 30 defined in \`.github/RULESET-POLICY.md\`.
 
           ## What this means
