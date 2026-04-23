@@ -1,4 +1,4 @@
-name: Plugin label from issue form
+name: Auto-label Plugin Issues
 
 # Applies a `plugin:<name>` label derived from the "Plugin" dropdown in
 # .github/ISSUE_TEMPLATE/bug_report.yml and feature_request.yml. Issue forms

@@ -1,4 +1,4 @@
-name: incident-staleness
+name: Audit Stale Incidents (Weekly)
 
 # Weekly cron that flags `auto:hook-failure` issues that have been OPEN
 # ≥14 days without human triage. The staleness bar is conservative: real
@@ -46,8 +46,7 @@ jobs:
             AGE=$((NOW_TS - CREATED_TS))
             if [ "$AGE" -ge "$CUTOFF_SECONDS" ]; then
               AGE_DAYS=$((AGE / 86400))
-              STALE_ITEMS="${STALE_ITEMS}- [ ] #${NUMBER} — \"${TITLE}\" (${AGE_DAYS}d old)
-"
+              STALE_ITEMS="${STALE_ITEMS}- [ ] #${NUMBER} — \"${TITLE}\" (${AGE_DAYS}d old)"$'\n'
               STALE_COUNT=$((STALE_COUNT + 1))
             fi
           done < <(gh issue list \
@@ -89,34 +88,44 @@ jobs:
             exit 0
           fi
 
-          BODY="The following \`auto:hook-failure\` issues have been open for at least **14 days** without being closed or referenced by a merged PR:
+          # Heredoc → file → --body-file pattern. A multi-line shell
+          # string assigned inline (BODY="...") with continuation lines
+          # at column 0 would end the enclosing YAML `run: |` block
+          # scalar prematurely. Heredoc content is written to a tmpfile;
+          # YAML strips the block's base indent before bash parses, so
+          # the heredoc body and EOF land at column 0 without any
+          # post-processing.
+          BODY_FILE=$(mktemp)
+          cat > "$BODY_FILE" <<EOF
+          The following \`auto:hook-failure\` issues have been open for at least **14 days** without being closed or referenced by a merged PR:
 
-${ITEMS}
+          ${ITEMS}
 
-## What this means
+          ## What this means
 
-\`auto:hook-failure\` issues are auto-filed by \`error-reporter\`'s Phase 0/3 pipeline. Each one represents a hook-guard deny that the reporter believes indicates a regression (not a routine routing deny). Letting them accumulate defeats the purpose — either:
+          \`auto:hook-failure\` issues are auto-filed by \`error-reporter\`'s Phase 0/3 pipeline. Each one represents a hook-guard deny that the reporter believes indicates a regression (not a routine routing deny). Letting them accumulate defeats the purpose — either:
 
-- **Real defects** that need triage (close loop: scaffold an eval via \`error-reporter/scripts/incident-to-eval.py\`, then fix the underlying harness or plugin).
-- **False positives** that need filter tuning (update the preset's \`routine_deny_rules\` so the same deny pattern doesn't re-trigger).
-- **Process drift** (the \`## Counterfactual\` section is never getting filled; close with \`not-actionable\` or add to the reporter's ignore list).
+          - **Real defects** that need triage (close loop: scaffold an eval via \`error-reporter/scripts/incident-to-eval.py\`, then fix the underlying harness or plugin).
+          - **False positives** that need filter tuning (update the preset's \`routine_deny_rules\` so the same deny pattern doesn't re-trigger).
+          - **Process drift** (the \`## Counterfactual\` section is never getting filled; close with \`not-actionable\` or add to the reporter's ignore list).
 
-## Recommended triage
+          ## Recommended triage
 
-1. Run \`python3 error-reporter/scripts/incident-to-eval.py --issue <url>\` to scaffold a meta-eval. If it refuses with \`empty Counterfactual\`, fill that section first.
-2. If the incident is no longer actionable, close with a comment explaining why so future audits know it was triaged (not abandoned).
-3. If the class of incident is routine (a guard denying exactly as designed), update the preset's \`routine_deny_rules\` and regenerate any baselines.
+          1. Run \`python3 error-reporter/scripts/incident-to-eval.py --issue <url>\` to scaffold a meta-eval. If it refuses with \`empty Counterfactual\`, fill that section first.
+          2. If the incident is no longer actionable, close with a comment explaining why so future audits know it was triaged (not abandoned).
+          3. If the class of incident is routine (a guard denying exactly as designed), update the preset's \`routine_deny_rules\` and regenerate any baselines.
 
-## Policy reference
+          ## Policy reference
 
-- Workflow: \`.github/workflows/incident-staleness.yml\`
-- Introducing issue: #23 (incident-to-eval)
-- Threshold: 14 days — conservative; lower this when the triage loop stabilizes
+          - Workflow: \`.github/workflows/incident-staleness.yml\`
+          - Introducing issue: #23 (incident-to-eval)
+          - Threshold: 14 days — conservative; lower this when the triage loop stabilizes
 
-This is an automated weekly summary. Close it after triaging the listed items; the next run will refile if fresh stale items appear."
+          This is an automated weekly summary. Close it after triaging the listed items; the next run will refile if fresh stale items appear.
+          EOF
 
           gh issue create \
             --repo "${{ github.repository }}" \
             --title "$TITLE" \
             --label "plugin:error-reporter" \
-            --body "$BODY"
+            --body-file "$BODY_FILE"

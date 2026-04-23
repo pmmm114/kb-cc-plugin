@@ -1,4 +1,4 @@
-name: label-audit
+name: Audit Reporter Labels (Weekly)
 
 # Weekly cron that counts `reporter:*` labels on the repository and files
 # a warning issue if the total exceeds the policy threshold (≤30). The
@@ -55,34 +55,44 @@ jobs:
             echo "Open audit issue already filed for $WEEK_TAG — skipping."
             exit 0
           fi
-          BODY="The \`reporter:*\` label count on this repository is **$COUNT**, which exceeds the policy threshold of 30 defined in \`.github/RULESET-POLICY.md\`.
+          # Heredoc → file → --body-file pattern. A multi-line shell
+          # string assigned inline (BODY="...") with continuation lines
+          # at column 0 would end the enclosing YAML `run: |` block
+          # scalar prematurely. Heredoc content is written to a tmpfile;
+          # YAML strips the block's base indent before bash parses, so
+          # the heredoc body and EOF land at column 0 without any
+          # post-processing.
+          BODY_FILE=$(mktemp)
+          cat > "$BODY_FILE" <<EOF
+          The \`reporter:*\` label count on this repository is **$COUNT**, which exceeds the policy threshold of 30 defined in \`.github/RULESET-POLICY.md\`.
 
-## What this means
+          ## What this means
 
-The 5-axis label schema (#22) is designed to stay bounded. Runaway growth is usually one of:
+          The 5-axis label schema (#22) is designed to stay bounded. Runaway growth is usually one of:
 
-- **\`reporter:cluster:*\` fanout** — a code path producing distinct 12-char hashes per incident (hash collision is not the problem; the *input* to the hash is too diverse). Investigate whether the hash input tuple \`hook:phase:severity:agent\` actually clusters related incidents.
-- **\`reporter:repo:*\` accretion** — the plugin has been used against many repos. Prune stale \`reporter:repo:<owner>__<repo>\` labels that no longer correspond to active work.
-- **\`reporter:hook:*\` new hooks** — harness added hooks without updating any schema. Usually benign; acknowledge and close.
+          - **\`reporter:cluster:*\` fanout** — a code path producing distinct 12-char hashes per incident (hash collision is not the problem; the *input* to the hash is too diverse). Investigate whether the hash input tuple \`hook:phase:severity:agent\` actually clusters related incidents.
+          - **\`reporter:repo:*\` accretion** — the plugin has been used against many repos. Prune stale \`reporter:repo:<owner>__<repo>\` labels that no longer correspond to active work.
+          - **\`reporter:hook:*\` new hooks** — harness added hooks without updating any schema. Usually benign; acknowledge and close.
 
-## Pruning
+          ## Pruning
 
-\`\`\`bash
-gh label list --repo ${{ github.repository }} --limit 200 --json name --jq '.[] | select(.name | startswith(\"reporter:cluster:\")) | .name'
-# identify stale entries, then:
-gh label delete <name> --repo ${{ github.repository }} --yes
-\`\`\`
+          \`\`\`bash
+          gh label list --repo ${{ github.repository }} --limit 200 --json name --jq '.[] | select(.name | startswith("reporter:cluster:")) | .name'
+          # identify stale entries, then:
+          gh label delete <name> --repo ${{ github.repository }} --yes
+          \`\`\`
 
-## Policy reference
+          ## Policy reference
 
-- Audit workflow: \`.github/workflows/label-audit.yml\`
-- Schema source: \`error-reporter/scripts/report.sh\` (function \`_five_axis_labels\`)
-- Originating issue: #22 (5-axis labels)
+          - Audit workflow: \`.github/workflows/label-audit.yml\`
+          - Schema source: \`error-reporter/scripts/report.sh\` (function \`_five_axis_labels\`)
+          - Originating issue: #22 (5-axis labels)
 
-This is an automated warning. Closing it is fine if you've reviewed the labels and the count is justified for the current usage pattern."
+          This is an automated warning. Closing it is fine if you've reviewed the labels and the count is justified for the current usage pattern.
+          EOF
 
           gh issue create \
             --repo "${{ github.repository }}" \
             --title "$TITLE" \
             --label "plugin:error-reporter" \
-            --body "$BODY"
+            --body-file "$BODY_FILE"
